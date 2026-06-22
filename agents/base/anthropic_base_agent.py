@@ -12,4 +12,3 @@ def anthropic_base_agent(state: dict, system_prompt: str, llm: ChatAnthropic) ->
     response = llm.invoke(messages)
 
     return {"output": response.content}
-
