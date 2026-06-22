@@ -5,10 +5,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-llm = ChatAnthropic(
-    model="claude-sonnet-4-6"
-)
-
 # nested dict: failure signal schema
 class FailureSignal(TypedDict):
     detected: bool
@@ -47,8 +43,9 @@ class DomainRoute(TypedDict):
 
     domain: Literal["reasoning", "coding", "math"]
 
-llm_domain_identifier = llm.with_structured_output(DomainRoute)
+llm_domain_identifier = ChatAnthropic(
+    model="claude-sonnet-4-6",
+    temperature=0
+)
 
-
-
-    
+llm_domain_identifier = llm_domain_identifier.with_structured_output(DomainRoute)
