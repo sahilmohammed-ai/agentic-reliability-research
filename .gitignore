@@ -1,3 +1,8 @@
 .venv/
 .env
 .info/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
