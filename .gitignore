@@ -6,3 +6,12 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Rollout data (large, environment-generated)
+data/rollouts/
+
+# Model checkpoints
+checkpoints/
+
+# macOS
+.DS_Store
