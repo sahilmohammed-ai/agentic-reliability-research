@@ -3,10 +3,12 @@ import yaml
 import alfworld.agents.environment as environment
 
 
+# wrapper around ALFWorld that provides a gym-style interface
 class AlfWorldEnv:
-    """Thin wrapper around ALFWorld's TextWorld env with a consistent gym-style API."""
+    """thin wrapper around ALFWorld's TextWorld env with a consistent gym-style API."""
 
     def __init__(self, config_path: str, split: str = "train"):
+        # load yaml config and initialize alfworld environment
         os.environ.setdefault("ALFWORLD_DATA", os.path.expanduser("~/.cache/alfworld"))
         with open(config_path) as f:
             config = yaml.safe_load(f)
@@ -16,22 +18,28 @@ class AlfWorldEnv:
         self._last_info = None
 
     def reset(self) -> tuple[str, dict]:
+        """start new episode and return initial observation."""
         obs, info = self._env.reset()
         self._last_info = info
         return obs[0], info
 
     def step(self, action: str) -> tuple[str, float, bool, dict]:
+        """execute one action and return observation, reward, done flag, and info."""
+        # unwrap batch results since we use batch_size=1
         obs, scores, dones, info = self._env.step([action])
         self._last_info = info
         return obs[0], float(scores[0]), bool(dones[0]), info
 
     def admissible_commands(self, info: dict) -> list[str]:
+        """extract available actions from info dict."""
         return info["admissible_commands"][0]
 
     def won(self, info: dict) -> bool:
+        """check if task was completed successfully."""
         return bool(info["won"][0])
 
     def close(self):
+        """clean up environment resources gracefully."""
         try:
             self._env.close()
         except Exception:

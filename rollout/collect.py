@@ -16,20 +16,25 @@ load_dotenv()
 from envs.alfworld_env import AlfWorldEnv
 from rollout.runner import run_episode
 
+# path to base alfworld config file
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "alfworld_base.yaml")
 
 
 def collect(n: int, out_dir: str, split: str = "train") -> None:
+    """collect n rollout trajectories and save as json files."""
+    # create output directory and initialize environment
     os.makedirs(out_dir, exist_ok=True)
     env = AlfWorldEnv(CONFIG_PATH, split=split)
 
     won_count = 0
     for i in range(n):
+        # run one episode and record trajectory
         task_id = f"{split}_{i:04d}"
         t0 = time.time()
         traj = run_episode(env, task_id=task_id)
         elapsed = time.time() - t0
 
+        # save trajectory to json file
         path = os.path.join(out_dir, f"{task_id}.json")
         with open(path, "w") as f:
             json.dump(traj.to_dict(), f, indent=2)
@@ -45,6 +50,7 @@ def collect(n: int, out_dir: str, split: str = "train") -> None:
 
 
 if __name__ == "__main__":
+    # parse cli arguments and collect rollouts
     parser = argparse.ArgumentParser()
     parser.add_argument("--n", type=int, default=5, help="Number of episodes to collect")
     parser.add_argument("--out", type=str, default="data/rollouts/train")

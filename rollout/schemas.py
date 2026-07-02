@@ -5,10 +5,10 @@ from typing import Any
 @dataclass
 class Turn:
     step: int
-    role: str           # "thinker" | "worker" | "verifier_role"
+    role: str           # "thinker" or "worker"; verifier is applied during labeling, not here
     obs_before: str
-    action: str         # for worker: the env command chosen; for others: the text output
-    obs_after: str      # empty string for non-env-stepping turns
+    action: str         # for worker: the env command chosen; for thinker: the plan text
+    obs_after: str      # empty string for thinker; env observation for worker
     env_reward: float   # non-zero only for worker turns that call env.step()
     done: bool
     metadata: dict[str, Any] = field(default_factory=dict)

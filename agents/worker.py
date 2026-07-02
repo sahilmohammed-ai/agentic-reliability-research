@@ -53,7 +53,7 @@ def act(
     )
     raw = message.content[0].text.strip()
 
-    # match claude's output to actual command with fallback to first command
+    # match claude's output format to actual command with fallback to first command
     raw_lower = raw.lower()
     for cmd in admissible_commands:
         if cmd.lower() == raw_lower:

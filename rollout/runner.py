@@ -4,19 +4,19 @@ Single-episode runner with a fixed (heuristic) coordinator.
 Fixed coordination policy:
   - Thinker runs once at the start to generate a plan.
   - Worker acts every step, selecting from admissible commands.
-  - Verifier-role checks every VERIFIER_INTERVAL steps (advisory; result stored in turn metadata).
 
-This fixed coordinator is Baseline 1 in the evaluation. The learned PPO coordinator will replace
-the heuristic routing logic here once the verifier is trained.
+This fixed coordinator is Baseline 1 in the evaluation.
+
+The verifier is NOT involved in rollout collection. It is trained later via TD/GAE labeling
+(rollout/label.py), then used during inference for failure detection and RL reward.
 """
 
 import uuid
 from envs.alfworld_env import AlfWorldEnv
-from agents import thinker, worker, verifier_role
+from agents import thinker, worker
 from rollout.schemas import Turn, Trajectory
 
-VERIFIER_INTERVAL = 3   # how often the verifier_role checks (in env steps)
-MAX_STEPS = 50          # episode step cap
+MAX_STEPS = 50  # episode step cap
 
 
 def run_episode(env: AlfWorldEnv, task_id: str | None = None) -> Trajectory:
@@ -37,20 +37,6 @@ def run_episode(env: AlfWorldEnv, task_id: str | None = None) -> Trajectory:
 
     while not done and env_step < MAX_STEPS:
         admissible = env.admissible_commands(info)
-
-        # Verifier-role: advisory check every VERIFIER_INTERVAL steps.
-        if env_step > 0 and env_step % VERIFIER_INTERVAL == 0:
-            check_result = verifier_role.check(task_goal, ep_plan, action_history, current_obs)
-            turns.append(Turn(
-                step=env_step,
-                role="verifier_role",
-                obs_before=current_obs,
-                action=check_result,
-                obs_after="",
-                env_reward=0.0,
-                done=False,
-                metadata={"type": "advisory_check"},
-            ))
 
         # Worker: select and execute one action.
         chosen = worker.act(task_goal, ep_plan, current_obs, admissible, action_history)
