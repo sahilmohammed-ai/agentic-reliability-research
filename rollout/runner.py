@@ -6,9 +6,6 @@ Fixed coordination policy:
   - Worker acts every step, selecting from admissible commands.
 
 This fixed coordinator is Baseline 1 in the evaluation.
-
-The verifier is NOT involved in rollout collection. It is trained later via TD/GAE labeling
-(rollout/label.py), then used during inference for failure detection and RL reward.
 """
 
 import uuid
