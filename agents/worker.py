@@ -26,6 +26,7 @@ def act(
     obs: str,
     admissible_commands: list[str],
     history: list[str] | None = None,
+    model: str = "claude-haiku-4-5-20251001",
 ) -> str:
     """select one admissible command that best advances the plan."""
     # optionally include last few actions for context
@@ -46,7 +47,7 @@ def act(
     )
     # call claude to pick next action
     message = _get_client().messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=model,
         max_tokens=64,
         system=SYSTEM,
         messages=[{"role": "user", "content": prompt}],

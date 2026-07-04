@@ -1,8 +1,8 @@
 """
-Collect N rollout trajectories from ALFWorld and save them to disk as JSON.
+collect n rollout trajectories from alfworld and save them to disk as json.
 
-Usage:
-    python -m rollout.collect --n 10 --out data/rollouts/train --split train
+usage:
+    python -m rollout.collect --n 10 --out data/rollouts/build_2 --model claude-opus-4-8
 """
 
 import argparse
@@ -14,13 +14,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from envs.alfworld_env import AlfWorldEnv
-from rollout.runner import run_episode
+from rollout.runner import run_episode, DEFAULT_MODEL
 
 # path to base alfworld config file
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "alfworld_base.yaml")
 
 
-def collect(n: int, out_dir: str, split: str = "train") -> None:
+def collect(n: int, out_dir: str, split: str = "train", model: str = DEFAULT_MODEL) -> None:
     """collect n rollout trajectories and save as json files."""
     # create output directory and initialize environment
     os.makedirs(out_dir, exist_ok=True)
@@ -31,7 +31,7 @@ def collect(n: int, out_dir: str, split: str = "train") -> None:
         # run one episode and record trajectory
         task_id = f"{split}_{i:04d}"
         t0 = time.time()
-        traj = run_episode(env, task_id=task_id)
+        traj = run_episode(env, task_id=task_id, model=model)
         elapsed = time.time() - t0
 
         # save trajectory to json file
@@ -55,5 +55,6 @@ if __name__ == "__main__":
     parser.add_argument("--n", type=int, default=5, help="Number of episodes to collect")
     parser.add_argument("--out", type=str, default="data/rollouts/train")
     parser.add_argument("--split", type=str, default="train", choices=["train", "eval_id", "eval_ood"])
+    parser.add_argument("--model", type=str, default=DEFAULT_MODEL, help="model used for both thinker and worker")
     args = parser.parse_args()
-    collect(args.n, args.out, args.split)
+    collect(args.n, args.out, args.split, args.model)

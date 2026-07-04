@@ -1,11 +1,11 @@
 """
-Single-episode runner with a fixed (heuristic) coordinator.
+single-episode runner with a fixed (heuristic) coordinator.
 
-Fixed coordination policy:
-  - Thinker runs once at the start to generate a plan.
-  - Worker acts every step, selecting from admissible commands.
+fixed coordination policy:
+  - thinker runs once at the start to generate a plan
+  - worker acts every step, selecting from admissible commands
 
-This fixed coordinator is Baseline 1 in the evaluation.
+this fixed coordinator is baseline 1 in the evaluation.
 """
 
 import uuid
@@ -13,21 +13,25 @@ from envs.alfworld_env import AlfWorldEnv
 from agents import thinker, worker
 from rollout.schemas import Turn, Trajectory
 
+# same model used for both thinker and worker in a given run, swapped per performance test
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 MAX_STEPS = 50  # episode step cap
 
 
-def run_episode(env: AlfWorldEnv, task_id: str | None = None) -> Trajectory:
-    """Run one episode end-to-end with the fixed coordinator. Returns a Trajectory."""
+def run_episode(env: AlfWorldEnv, task_id: str | None = None, model: str = DEFAULT_MODEL) -> Trajectory:
+    """run one episode end-to-end with the fixed coordinator. returns a trajectory."""
     task_id = task_id or str(uuid.uuid4())[:8]
     turns: list[Turn] = []
     action_history: list[str] = []
     env_step = 0
 
     obs, info = env.reset()
-    task_goal = obs.split("\n")[0].strip()
+    # pull the real task line, not just the banner (obs[0] was the old, wrong extraction)
+    obs_lines = [l.strip() for l in obs.split("\n")]
+    task_goal = next((l for l in obs_lines if l.startswith("Your task is to:")), obs_lines[0])
 
-    # Thinker: generate plan once at episode start.
-    ep_plan = thinker.plan(task_goal, obs)
+    # thinker: generate plan once at episode start
+    ep_plan = thinker.plan(task_goal, obs, model=model)
 
     done = False
     current_obs = obs
@@ -35,8 +39,8 @@ def run_episode(env: AlfWorldEnv, task_id: str | None = None) -> Trajectory:
     while not done and env_step < MAX_STEPS:
         admissible = env.admissible_commands(info)
 
-        # Worker: select and execute one action.
-        chosen = worker.act(task_goal, ep_plan, current_obs, admissible, action_history)
+        # worker: select and execute one action
+        chosen = worker.act(task_goal, ep_plan, current_obs, admissible, action_history, model=model)
         next_obs, reward, done, info = env.step(chosen)
         env_step += 1
         action_history.append(chosen)

@@ -20,13 +20,13 @@ Each step should be a single, concrete physical action (e.g. "1. go to the desk"
 Output only the numbered plan, nothing else."""
 
 
-def plan(task_goal: str, initial_obs: str) -> str:
+def plan(task_goal: str, initial_obs: str, model: str = "claude-haiku-4-5-20251001") -> str:
     """generate high-level plan from task goal and initial scene."""
     # build prompt with task and initial observation
     prompt = f"Task: {task_goal}\n\nScene:\n{initial_obs}\n\nPlan:"
     # call claude to generate plan
     message = _get_client().messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=model,
         max_tokens=256,
         system=SYSTEM,
         messages=[{"role": "user", "content": prompt}],
