@@ -1,7 +1,7 @@
 # agentic-reliability-research
 
 Research project on a learned reliability layer (turn-level agentic verifier + RL coordinator)
-for an LLM multi-agent system. See `.info/CLAUDE.MD` for the full architecture and research plan.
+for an LLM multi-agent system.
 
 Current stage: rollout collection with a fixed coordinator, comparing frozen thinker/worker models
 (see `reports/`). No verifier or learned coordinator yet.
@@ -93,15 +93,4 @@ Each `worker` turn has `obs_before`, `action`, `obs_after`, `env_reward` (0 exce
 step of a won episode), and `done`. The `won` field at the top of the file is the episode-level
 outcome used later for TD/GAE labeling.
 
-## Repo layout
 
-```
-agents/       frozen role agents (thinker, worker) + shared llm.py backend router
-envs/         gym-style ALFWorld wrapper
-rollout/      schemas, episode runner (fixed coordinator), collection CLI
-scripts/      standalone environment sanity check
-configs/      ALFWorld config
-data/         collected rollouts, one build_N subdirectory per performance test (gitignored)
-reports/      one markdown report per build, written after each rollout collection run
-.info/        CLAUDE.MD, the full project knowledge base and research plan
-```
