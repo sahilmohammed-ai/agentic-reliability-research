@@ -1,16 +1,4 @@
-import anthropic
-
-# singleton client to avoid reinitializing on each call
-_client = None
-
-
-def _get_client() -> anthropic.Anthropic:
-    """lazy init and cache the anthropic client."""
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic()
-    return _client
-
+from agents.llm import complete
 
 # thinker generates high-level plan from task goal and initial observation
 SYSTEM = """\
@@ -24,11 +12,4 @@ def plan(task_goal: str, initial_obs: str, model: str = "claude-haiku-4-5-202510
     """generate high-level plan from task goal and initial scene."""
     # build prompt with task and initial observation
     prompt = f"Task: {task_goal}\n\nScene:\n{initial_obs}\n\nPlan:"
-    # call claude to generate plan
-    message = _get_client().messages.create(
-        model=model,
-        max_tokens=256,
-        system=SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return message.content[0].text.strip()
+    return complete(model, SYSTEM, prompt, max_tokens=256)

@@ -23,4 +23,4 @@
 **Notes:**
 - Opus did not ceiling out at 100%, so this task set still has discriminating power at the frontier tier.
 - Failure mode is still timeout-only across both builds so far. Worth checking if this is a property of the task set/step cap rather than the model.
-- Next baseline candidate: a mid-tier model (Sonnet or a smaller open model) to see where the smaller-model-plus-our-approach comparison actually lives relative to this ceiling.
+

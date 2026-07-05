@@ -1,16 +1,4 @@
-import anthropic
-
-# singleton client to avoid reinitializing on each call
-_client = None
-
-
-def _get_client() -> anthropic.Anthropic:
-    """lazy init and cache the anthropic client."""
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic()
-    return _client
-
+from agents.llm import complete
 
 # worker picks the next action to take from available commands
 SYSTEM = """\
@@ -45,16 +33,9 @@ def act(
         f"Admissible commands:\n{commands_block}\n\n"
         "Choose one command from the list above:"
     )
-    # call claude to pick next action
-    message = _get_client().messages.create(
-        model=model,
-        max_tokens=64,
-        system=SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = message.content[0].text.strip()
+    raw = complete(model, SYSTEM, prompt, max_tokens=64)
 
-    # match claude's output format to actual command with fallback to first command
+    # match model's output format to actual command with fallback to first command
     raw_lower = raw.lower()
     for cmd in admissible_commands:
         if cmd.lower() == raw_lower:
