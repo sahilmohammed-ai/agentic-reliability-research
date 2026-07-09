@@ -36,6 +36,17 @@ from transformers import AutoTokenizer
 from verifier.dataset import VerifierDataset, collate_fn, load_examples
 from verifier.model import VerifierModel, BASE_MODEL
 
+# 8-bit adamw is only available (and only needed) on cuda. full-finetune on cuda puts
+# adamw's fp32 momentum+variance state on all 3b backbone params, ~25gb by itself, more
+# than a single gpu (e.g. 22gb) can hold alongside the model weights and activations.
+# 8-bit optimizer state cuts that to ~6gb. mps has no bitsandbytes support, and frozen-mode
+# runs there only ever optimize the tiny value head anyway, so plain adamw is fine there.
+try:
+    import bitsandbytes as bnb
+    HAS_BITSANDBYTES = True
+except ImportError:
+    HAS_BITSANDBYTES = False
+
 BETA = 0.5              # weight on the advantage loss term, q_value loss is the primary signal
 # defaults assume a frozen backbone on mps. full fine-tuning on a cuda gpu should override
 # these via cli flags (bigger batch, lower lr since the whole backbone now trains).
@@ -139,8 +150,23 @@ def train(
     # when frozen, only the head has requires_grad=True; when fine-tuning, this covers
     # the whole model, so filter to trainable params either way rather than branching
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = AdamW(trainable_params, lr=learning_rate)
     print(f"trainable parameters: {sum(p.numel() for p in trainable_params):,}", flush=True)
+
+    # full-finetune on cuda: use 8-bit adamw so optimizer state doesn't itself oom the gpu.
+    # everything else (frozen-head mode, or any non-cuda device): plain fp32 adamw is fine,
+    # since the head alone is a few thousand parameters.
+    use_8bit = (not freeze_backbone) and device.type == "cuda" and HAS_BITSANDBYTES
+    if use_8bit:
+        optimizer = bnb.optim.AdamW8bit(trainable_params, lr=learning_rate)
+        print("using 8-bit AdamW (bitsandbytes) to fit optimizer state on the GPU", flush=True)
+    else:
+        if (not freeze_backbone) and device.type == "cuda" and not HAS_BITSANDBYTES:
+            print(
+                "WARNING: full-finetune on cuda without bitsandbytes installed, "
+                "optimizer state may not fit in gpu memory. pip install bitsandbytes.",
+                flush=True,
+            )
+        optimizer = AdamW(trainable_params, lr=learning_rate)
 
     for epoch in range(1, num_epochs + 1):
         train_q_loss, train_a_loss = run_epoch(
