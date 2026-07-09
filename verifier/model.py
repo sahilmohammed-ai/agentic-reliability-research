@@ -13,6 +13,13 @@ the backbone can be frozen or fully fine-tuned, controlled by freeze_backbone:
   - unfrozen: the whole 3b model trains alongside the head, same as agentprm's own
     setup. this needs real gpu memory (a100/h100-class), so it runs on lightning ai,
     not locally. this is the mode used for the actual verifier checkpoint.
+
+when unfrozen, gradient checkpointing is enabled on the backbone. backpropagating through
+all 3b params means every layer's activations must be kept in memory for the backward pass,
+which alone OOM'd a 22gb gpu even after switching to 8-bit adamw (that fix only addressed
+optimizer state, not activations). checkpointing trades compute for memory: instead of
+storing every layer's activations, it recomputes them during backward, so only a fraction
+need to be held at once. standard practice for fine-tuning models this size on one gpu.
 """
 
 import torch
@@ -32,6 +39,12 @@ class VerifierModel(nn.Module):
             for param in self.backbone.parameters():
                 param.requires_grad = False
             self.backbone.eval()
+        else:
+            # only useful (and only safe) when the backbone actually has gradients flowing
+            # through it. requires disabling the kv cache, which we don't use here anyway
+            # since this is a single forward pass per turn, not autoregressive generation.
+            self.backbone.gradient_checkpointing_enable()
+            self.backbone.config.use_cache = False
 
         hidden_size = self.backbone.config.hidden_size
         # two outputs: q_value and advantage, both plain scalars (no activation, these
