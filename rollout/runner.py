@@ -4,6 +4,7 @@ single-episode runner with a fixed (heuristic) coordinator.
 fixed coordination policy:
   - thinker runs once at the start to generate a plan
   - worker acts every step, selecting from admissible commands
+  - thinker replans every REPLAN_INTERVAL steps, given the full action history so far
 
 this fixed coordinator is baseline 1 in the evaluation.
 """
@@ -15,7 +16,8 @@ from rollout.schemas import Turn, Trajectory
 
 # same model used for both thinker and worker in a given run, swapped per performance test
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
-MAX_STEPS = 50  # episode step cap
+MAX_STEPS = 50        # episode step cap
+REPLAN_INTERVAL = 15  # worker steps between thinker replans
 
 
 def run_episode(env: AlfWorldEnv, task_id: str | None = None, model: str = DEFAULT_MODEL) -> Trajectory:
@@ -38,6 +40,21 @@ def run_episode(env: AlfWorldEnv, task_id: str | None = None, model: str = DEFAU
 
     while not done and env_step < MAX_STEPS:
         admissible = env.admissible_commands(info)
+
+        # thinker: replan every REPLAN_INTERVAL steps, seeing the full action history so far
+        if env_step > 0 and env_step % REPLAN_INTERVAL == 0:
+            new_plan = thinker.replan(task_goal, ep_plan, action_history, current_obs, model=model)
+            turns.append(Turn(
+                step=env_step,
+                role="thinker",
+                obs_before=current_obs,
+                action=new_plan,
+                obs_after="",
+                env_reward=0.0,
+                done=False,
+                metadata={"type": "replan", "old_plan": ep_plan},
+            ))
+            ep_plan = new_plan
 
         # worker: select and execute one action
         chosen = worker.act(task_goal, ep_plan, current_obs, admissible, action_history, model=model)

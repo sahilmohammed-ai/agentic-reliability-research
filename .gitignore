@@ -7,8 +7,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Rollout data (large, environment-generated)
+# Rollout and Labeled data (large, environment-generated)
 data/rollouts/
+data/labeled/
 
 # Model checkpoints
 checkpoints/
