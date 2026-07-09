@@ -168,6 +168,9 @@ def train(
             )
         optimizer = AdamW(trainable_params, lr=learning_rate)
 
+    os.makedirs(out_dir, exist_ok=True)
+    best_val_loss = float("inf")
+
     for epoch in range(1, num_epochs + 1):
         train_q_loss, train_a_loss = run_epoch(
             model, train_loader, optimizer, device, train=True, log_prefix=f"epoch {epoch} [train]"
@@ -175,17 +178,26 @@ def train(
         val_q_loss, val_a_loss = run_epoch(
             model, val_loader, optimizer, device, train=False, log_prefix=f"epoch {epoch} [val]"
         )
+        val_loss = val_q_loss + BETA * val_a_loss
         print(
             f"epoch {epoch}/{num_epochs} | "
             f"train: q_loss={train_q_loss:.4f} adv_loss={train_a_loss:.4f} | "
-            f"val: q_loss={val_q_loss:.4f} adv_loss={val_a_loss:.4f}",
+            f"val: q_loss={val_q_loss:.4f} adv_loss={val_a_loss:.4f} (combined={val_loss:.4f})",
             flush=True,
         )
 
-        # checkpoint after every epoch, not just at the end, so a stall or kill later
-        # doesn't lose progress already made
-        os.makedirs(out_dir, exist_ok=True)
-        torch.save(model.state_dict(), os.path.join(out_dir, "verifier.pt"))
+        # always save the latest epoch, so an interruption doesn't lose all progress
+        torch.save(model.state_dict(), os.path.join(out_dir, "verifier_last.pt"))
+
+        # separately, keep a copy of whichever epoch had the best val loss so far. a later
+        # epoch (see epoch 5 in the first full run: val loss roughly doubled vs epoch 4,
+        # likely a training instability similar to the spike seen in epoch 2) can end up
+        # worse than an earlier one, and without this the run silently overwrites a better
+        # checkpoint with a worse one just because it happened to finish last.
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), os.path.join(out_dir, "verifier.pt"))
+            print(f"  -> new best val loss ({val_loss:.4f}), saved as verifier.pt", flush=True)
 
     tokenizer.save_pretrained(out_dir)
     print(f"saved verifier checkpoint to {out_dir}/", flush=True)
