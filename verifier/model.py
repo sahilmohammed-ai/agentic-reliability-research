@@ -55,8 +55,15 @@ class VerifierModel(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """returns a (batch, 2) tensor: column 0 = q_value, column 1 = advantage."""
-        # no_grad only when frozen, otherwise we need the autograd graph through the backbone
-        with torch.set_grad_enabled(not self.freeze_backbone):
+        # gradients only need to flow through the backbone when it's unfrozen AND we're
+        # actually training. self.training reflects .train()/.eval(), toggled by run_epoch's
+        # train flag. previously this only checked freeze_backbone, so during the val pass
+        # (train=False) an unfrozen backbone still built the full autograd graph and kept
+        # gradient checkpointing active, holding onto memory the training pass never released.
+        # that's what caused an OOM on the very first validation batch after a full epoch of
+        # training completed cleanly.
+        needs_grad = (not self.freeze_backbone) and self.training
+        with torch.set_grad_enabled(needs_grad):
             outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
         hidden_states = outputs.last_hidden_state  # (batch, seq_len, hidden_size)
 
