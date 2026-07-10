@@ -1,15 +1,25 @@
 """
 single-episode runner with a fixed (heuristic) coordinator.
 
-fixed coordination policy:
-  - thinker runs once at the start to generate a plan
-  - worker acts every step, selecting from admissible commands
-  - thinker replans every REPLAN_INTERVAL steps, given the full action history so far
+three coordination modes, controlled by replan_mode:
+  - "interval": thinker replans every REPLAN_INTERVAL steps on a fixed schedule (build_6).
+  - "stagnation": thinker replans as soon as the worker's last STAGNATION_WINDOW actions show
+    STAGNATION_MAX_UNIQUE or fewer distinct actions, i.e. it's stuck cycling (build_7). a short
+    cooldown after each replan stops it from re-triggering every single step while the worker
+    is still settling into the new plan.
+  - "mask": same stagnation trigger as above, but on top of the replan it also masks the single
+    most-repeated recent action for that one turn (build_8). replanning only suggests a new plan
+    the worker can ignore; masking is a hard intervention it cannot, since the repeated action is
+    removed from the admissible set for exactly that turn, then restored. drops only the single
+    most-frequent action (not the whole cycle) to minimize the risk of blocking an action that
+    was actually needed to win.
 
-this fixed coordinator is baseline 1 in the evaluation.
+in all modes: thinker runs once at the start to generate a plan, worker acts every step.
 """
 
 import uuid
+from collections import Counter
+
 from envs.alfworld_env import AlfWorldEnv
 from agents import thinker, worker
 from rollout.schemas import Turn, Trajectory
@@ -17,20 +27,53 @@ from rollout.schemas import Turn, Trajectory
 # same model used for both thinker and worker in a given run, swapped per performance test
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 MAX_STEPS = 50        # episode step cap
-REPLAN_INTERVAL = 15  # worker steps between thinker replans
+
+REPLAN_INTERVAL = 15  # interval mode: worker steps between thinker replans
+
+# stagnation mode: replan when the last STAGNATION_WINDOW actions contain at most
+# STAGNATION_MAX_UNIQUE distinct actions (a short cycle repeating). matches the <=3-unique
+# threshold already used across build_2 through build_6 to classify oscillation failures,
+# so results stay comparable to that prior analysis.
+STAGNATION_WINDOW = 6
+STAGNATION_MAX_UNIQUE = 3
+# steps to wait after a replan before stagnation can trigger again, so the thinker isn't
+# re-invoked every step while the worker is still settling into the new plan (the new plan's
+# first couple of actions could otherwise still look "stuck" relative to the pre-replan history)
+STAGNATION_COOLDOWN = 4
 
 
-def run_episode(env: AlfWorldEnv, task_id: str | None = None, model: str = DEFAULT_MODEL) -> Trajectory:
+def is_stagnating(action_history: list[str]) -> bool:
+    """true if the worker's recent actions show a short cycle repeating."""
+    if len(action_history) < STAGNATION_WINDOW:
+        return False
+    recent = action_history[-STAGNATION_WINDOW:]
+    return len(set(recent)) <= STAGNATION_MAX_UNIQUE
+
+
+def most_repeated_recent_action(action_history: list[str]) -> str | None:
+    """the single most frequent action in the recent stagnation window, or None."""
+    if len(action_history) < STAGNATION_WINDOW:
+        return None
+    recent = action_history[-STAGNATION_WINDOW:]
+    return Counter(recent).most_common(1)[0][0]
+
+
+def run_episode(
+    env: AlfWorldEnv,
+    task_id: str | None = None,
+    model: str = DEFAULT_MODEL,
+    replan_mode: str = "interval",
+) -> Trajectory:
     """run one episode end-to-end with the fixed coordinator. returns a trajectory."""
     task_id = task_id or str(uuid.uuid4())[:8]
     turns: list[Turn] = []
     action_history: list[str] = []
     env_step = 0
+    steps_since_replan = 0  # stagnation mode's cooldown counter
 
     obs, info = env.reset()
-    # pull the real task line, not just the banner (obs[0] was the old, wrong extraction)
-    obs_lines = [l.strip() for l in obs.split("\n")]
-    task_goal = next((l for l in obs_lines if l.startswith("Your task is to:")), obs_lines[0])
+    # each env knows where its own goal lives (alfworld embeds it in obs, scienceworld in info)
+    task_goal = env.task_goal(obs, info)
 
     # thinker: generate plan once at episode start
     ep_plan = thinker.plan(task_goal, obs, model=model)
@@ -41,8 +84,20 @@ def run_episode(env: AlfWorldEnv, task_id: str | None = None, model: str = DEFAU
     while not done and env_step < MAX_STEPS:
         admissible = env.admissible_commands(info)
 
-        # thinker: replan every REPLAN_INTERVAL steps, seeing the full action history so far
-        if env_step > 0 and env_step % REPLAN_INTERVAL == 0:
+        # a stagnation trigger drives both the "stagnation" and "mask" modes
+        stagnation_triggered = (
+            replan_mode in ("stagnation", "mask")
+            and steps_since_replan >= STAGNATION_COOLDOWN
+            and is_stagnating(action_history)
+        )
+
+        # decide whether to replan this step, based on the active trigger mode
+        if replan_mode == "interval":
+            should_replan = env_step > 0 and env_step % REPLAN_INTERVAL == 0
+        else:
+            should_replan = stagnation_triggered
+
+        if should_replan:
             new_plan = thinker.replan(task_goal, ep_plan, action_history, current_obs, model=model)
             turns.append(Turn(
                 step=env_step,
@@ -52,15 +107,36 @@ def run_episode(env: AlfWorldEnv, task_id: str | None = None, model: str = DEFAU
                 obs_after="",
                 env_reward=0.0,
                 done=False,
-                metadata={"type": "replan", "old_plan": ep_plan},
+                metadata={"type": "replan", "trigger": replan_mode, "old_plan": ep_plan},
             ))
             ep_plan = new_plan
+            steps_since_replan = 0
 
-        # worker: select and execute one action
-        chosen = worker.act(task_goal, ep_plan, current_obs, admissible, action_history, model=model)
+        # mask mode: on a stagnation trigger, drop the single most-repeated recent action
+        # from the admissible set for this one turn only, forcing a different choice. the
+        # full set is restored next turn (masked_action is not carried forward).
+        masked_action = None
+        worker_admissible = admissible
+        if replan_mode == "mask" and stagnation_triggered:
+            masked_action = most_repeated_recent_action(action_history)
+            if masked_action is not None:
+                filtered = [c for c in admissible if c != masked_action]
+                # guard: never hand the worker an empty list (only mask if something remains)
+                if filtered:
+                    worker_admissible = filtered
+                else:
+                    masked_action = None
+
+        # worker: select and execute one action (from the possibly-masked admissible set)
+        chosen = worker.act(task_goal, ep_plan, current_obs, worker_admissible, action_history, model=model)
         next_obs, reward, done, info = env.step(chosen)
         env_step += 1
+        steps_since_replan += 1
         action_history.append(chosen)
+
+        turn_metadata = {"admissible_commands": admissible}
+        if masked_action is not None:
+            turn_metadata["masked_action"] = masked_action
 
         turns.append(Turn(
             step=env_step,
@@ -70,7 +146,7 @@ def run_episode(env: AlfWorldEnv, task_id: str | None = None, model: str = DEFAU
             obs_after=next_obs,
             env_reward=reward,
             done=done,
-            metadata={"admissible_commands": admissible},
+            metadata=turn_metadata,
         ))
         current_obs = next_obs
 

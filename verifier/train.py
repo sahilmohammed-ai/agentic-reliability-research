@@ -1,27 +1,7 @@
 """
-train the verifier: a qwen2.5-3b backbone plus a 2-output value head, trained to predict
-q_value and advantage for every worker turn in a labeled rollout dataset.
-
-two modes, controlled by --freeze-backbone:
-  - frozen (default off): only the value head trains, backbone stays in inference mode.
-    light enough to run locally on apple silicon (mps), useful for a quick correctness
-    check of the training loop, but the verifier's quality is capped by how well qwen's
-    off-the-shelf representations already separate "on track" from "stuck" states.
-  - unfrozen (full fine-tune): the whole backbone trains alongside the head, same as
-    agentprm's own setup. needs real gpu memory, run this on lightning ai. this is the
-    mode that produces the actual verifier checkpoint used downstream.
-
-loss follows agentprm's dual-objective form: L = L_Q + beta * L_A, both plain MSE.
-q_value is the harder, more important signal (it drives the detector), advantage is
-the secondary term, hence beta < 1 by default.
-
-usage:
-    # quick local check, frozen backbone, small batch (mps-safe)
-    python -m verifier.train --data data/labeled/build_5 --out checkpoints/verifier_v1_local
-
-    # full fine-tune on a cuda gpu (lightning ai)
-    python -m verifier.train --data data/labeled/build_5 --out checkpoints/verifier_v1 \\
-        --full-finetune --batch-size 16 --epochs 5
+train verifier: qwen backbone + value head for q-value and advantage prediction.
+frozen mode: trains head only (local testing). unfrozen: full fine-tune (needs gpu).
+loss: L_Q + beta * L_A (q-value weighted higher, advantage secondary).
 """
 
 import argparse
@@ -36,25 +16,19 @@ from transformers import AutoTokenizer
 from verifier.dataset import VerifierDataset, collate_fn, load_examples
 from verifier.model import VerifierModel, BASE_MODEL
 
-# 8-bit adamw is only available (and only needed) on cuda. full-finetune on cuda puts
-# adamw's fp32 momentum+variance state on all 3b backbone params, ~25gb by itself, more
-# than a single gpu (e.g. 22gb) can hold alongside the model weights and activations.
-# 8-bit optimizer state cuts that to ~6gb. mps has no bitsandbytes support, and frozen-mode
-# runs there only ever optimize the tiny value head anyway, so plain adamw is fine there.
+# 8-bit adamw reduces optimizer state memory on cuda (needed for full fine-tune)
 try:
     import bitsandbytes as bnb
     HAS_BITSANDBYTES = True
 except ImportError:
     HAS_BITSANDBYTES = False
 
-BETA = 0.5              # weight on the advantage loss term, q_value loss is the primary signal
-# defaults assume a frozen backbone on mps. full fine-tuning on a cuda gpu should override
-# these via cli flags (bigger batch, lower lr since the whole backbone now trains).
-BATCH_SIZE = 2
-LEARNING_RATE = 1e-3    # fine for a frozen linear head; use ~1e-5 when fine-tuning the backbone
+BETA = 0.5              # advantage loss weight (q-value is primary)
+BATCH_SIZE = 2          # frozen mode default (use --batch-size for full fine-tune)
+LEARNING_RATE = 1e-3    # frozen mode default (use --lr ~1e-5 for full fine-tune)
 NUM_EPOCHS = 3
-VAL_FRACTION = 0.1      # held-out slice of the labeled data, purely for tracking overfitting
-LOG_EVERY = 200         # print running loss every N batches, so a stall is visible immediately
+VAL_FRACTION = 0.1      # held-out validation data
+LOG_EVERY = 200         # progress logging frequency
 
 
 def get_device() -> torch.device:
@@ -67,8 +41,7 @@ def get_device() -> torch.device:
 
 
 def run_epoch(model, loader, optimizer, device, train: bool, log_prefix: str = "") -> tuple[float, float]:
-    """one pass over the data. returns (avg q_loss, avg advantage_loss). optimizer is
-    None-safe: pass train=False and no gradient step happens, used for the val pass."""
+    """one pass over data. returns (avg q_loss, avg advantage_loss)."""
     model.train(mode=train)
     total_q_loss = 0.0
     total_a_loss = 0.0
@@ -86,7 +59,7 @@ def run_epoch(model, loader, optimizer, device, train: bool, log_prefix: str = "
             q_pred = predictions[:, 0]
             a_pred = predictions[:, 1]
 
-            # dual loss: L_Q + beta * L_A, both mse, matches agentprm's objective
+            # dual loss: L_Q + beta * L_A
             q_loss = torch.nn.functional.mse_loss(q_pred.float(), q_target.float())
             a_loss = torch.nn.functional.mse_loss(a_pred.float(), a_target.float())
             loss = q_loss + BETA * a_loss
@@ -100,8 +73,7 @@ def run_epoch(model, loader, optimizer, device, train: bool, log_prefix: str = "
         total_a_loss += a_loss.item()
         num_batches += 1
 
-        # print progress periodically, otherwise a stall or slow pass is invisible until
-        # the whole epoch finishes, which can be a long wait on this machine's mps backend
+        # periodic progress logging
         if log_prefix and num_batches % LOG_EVERY == 0:
             print(
                 f"{log_prefix} batch {num_batches}/{total_batches} | "
@@ -124,18 +96,16 @@ def train(
     device = get_device()
     print(f"using device: {device}, freeze_backbone={freeze_backbone}", flush=True)
 
-    # load and flatten every worker turn across the labeled trajectories
+    # load examples and create dataset
     examples = load_examples(data_dir)
     print(f"loaded {len(examples)} labeled worker turns from {data_dir}", flush=True)
     if len(examples) == 0:
         raise SystemExit(f"no labeled examples found in {data_dir}, run rollout.label first")
 
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-    # 256 tokens covers task+plan+observation+action comfortably (most alfworld
-    # observations are short) while keeping per-batch activation memory down
     dataset = VerifierDataset(examples, tokenizer, max_length=max_length)
 
-    # simple random split for a validation slice, just to watch for overfitting
+    # train/val split and dataloaders
     val_size = int(len(dataset) * VAL_FRACTION)
     train_size = len(dataset) - val_size
     train_set, val_set = random_split(dataset, [train_size, val_size])
@@ -146,26 +116,19 @@ def train(
 
     print(f"train examples: {len(train_set)}, val examples: {len(val_set)}", flush=True)
 
+    # model and trainable parameters
     model = VerifierModel(BASE_MODEL, freeze_backbone=freeze_backbone).to(device)
-    # when frozen, only the head has requires_grad=True; when fine-tuning, this covers
-    # the whole model, so filter to trainable params either way rather than branching
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     print(f"trainable parameters: {sum(p.numel() for p in trainable_params):,}", flush=True)
 
-    # full-finetune on cuda: use 8-bit adamw so optimizer state doesn't itself oom the gpu.
-    # everything else (frozen-head mode, or any non-cuda device): plain fp32 adamw is fine,
-    # since the head alone is a few thousand parameters.
+    # optimizer: 8-bit on cuda (full fine-tune), plain adamw elsewhere
     use_8bit = (not freeze_backbone) and device.type == "cuda" and HAS_BITSANDBYTES
     if use_8bit:
         optimizer = bnb.optim.AdamW8bit(trainable_params, lr=learning_rate)
-        print("using 8-bit AdamW (bitsandbytes) to fit optimizer state on the GPU", flush=True)
+        print("using 8-bit AdamW (bitsandbytes)", flush=True)
     else:
         if (not freeze_backbone) and device.type == "cuda" and not HAS_BITSANDBYTES:
-            print(
-                "WARNING: full-finetune on cuda without bitsandbytes installed, "
-                "optimizer state may not fit in gpu memory. pip install bitsandbytes.",
-                flush=True,
-            )
+            print("WARNING: full-finetune on cuda without bitsandbytes, may OOM", flush=True)
         optimizer = AdamW(trainable_params, lr=learning_rate)
 
     os.makedirs(out_dir, exist_ok=True)
@@ -186,14 +149,8 @@ def train(
             flush=True,
         )
 
-        # always save the latest epoch, so an interruption doesn't lose all progress
+        # save latest (recover from interruption) and best (early stopping)
         torch.save(model.state_dict(), os.path.join(out_dir, "verifier_last.pt"))
-
-        # separately, keep a copy of whichever epoch had the best val loss so far. a later
-        # epoch (see epoch 5 in the first full run: val loss roughly doubled vs epoch 4,
-        # likely a training instability similar to the spike seen in epoch 2) can end up
-        # worse than an earlier one, and without this the run silently overwrites a better
-        # checkpoint with a worse one just because it happened to finish last.
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), os.path.join(out_dir, "verifier.pt"))
@@ -206,15 +163,12 @@ def train(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, required=True, help="directory of labeled trajectory jsons")
-    parser.add_argument("--out", type=str, required=True, help="directory to save the trained checkpoint")
+    parser.add_argument("--out", type=str, required=True, help="directory to save checkpoint")
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
     parser.add_argument("--max-length", type=int, default=256)
-    parser.add_argument(
-        "--full-finetune", action="store_true",
-        help="train the whole backbone, not just the head. needs a real gpu, not mps.",
-    )
+    parser.add_argument("--full-finetune", action="store_true", help="train full backbone (needs gpu)")
     args = parser.parse_args()
     train(
         args.data,

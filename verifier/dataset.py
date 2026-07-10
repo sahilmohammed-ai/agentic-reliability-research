@@ -34,8 +34,7 @@ def load_examples(labeled_dir: str) -> list[dict]:
         for turn in traj["turns"]:
             if turn["role"] != "worker":
                 continue
-            # label.py only adds q_value/advantage to worker turns, so this should
-            # always be present, but skip defensively in case of partial/old data
+            # label.py only adds q_value/advantage to worker turns, so this should always be present
             if "q_value" not in turn:
                 continue
 
@@ -75,7 +74,7 @@ class VerifierDataset(Dataset):
             "advantage": torch.tensor(ex["advantage"], dtype=torch.float32),
         }
 
-
+# copy tokens into padded tensors
 def collate_fn(batch: list[dict], pad_token_id: int) -> dict:
     """right-pad input_ids/attention_mask to the longest sequence in the batch."""
     max_len = max(item["input_ids"].size(0) for item in batch)

@@ -38,6 +38,13 @@ class AlfWorldEnv:
         """check if task was completed successfully."""
         return bool(info["won"][0])
 
+    def task_goal(self, obs: str, info: dict) -> str:
+        """the 'Your task is to: ...' line, which alfworld embeds in the observation text.
+        signature is (obs, info) to match the scienceworld wrapper (which reads info instead),
+        so the runner can call env.task_goal(obs, info) uniformly for either environment."""
+        obs_lines = [l.strip() for l in obs.split("\n")]
+        return next((l for l in obs_lines if l.startswith("Your task is to:")), obs_lines[0])
+
     def close(self):
         """clean up environment resources gracefully."""
         try:
