@@ -26,7 +26,8 @@ from rollout.schemas import Turn, Trajectory
 
 # same model used for both thinker and worker in a given run, swapped per performance test
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
-MAX_STEPS = 50        # episode step cap
+MAX_STEPS = 50        # default episode step cap (alfworld); an env may advertise its own
+                      # via a step_limit attribute (scienceworld uses 100)
 
 REPLAN_INTERVAL = 15  # interval mode: worker steps between thinker replans
 
@@ -71,17 +72,29 @@ def run_episode(
     env_step = 0
     steps_since_replan = 0  # stagnation mode's cooldown counter
 
+    # let the env advertise its own step cap if it has one (scienceworld=100), else default
+    max_steps = getattr(env, "step_limit", MAX_STEPS)
+
     obs, info = env.reset()
     # each env knows where its own goal lives (alfworld embeds it in obs, scienceworld in info)
     task_goal = env.task_goal(obs, info)
 
-    # thinker: generate plan once at episode start
-    ep_plan = thinker.plan(task_goal, obs, model=model)
+    # optional per-env worker guidance (e.g. scienceworld's 'focus on' warning). envs without
+    # the method contribute no hint, so alfworld is unaffected.
+    env_hint = env.worker_hint() if hasattr(env, "worker_hint") else ""
+
+    # thinker: generate plan once at episode start, showing it the real command vocabulary so
+    # it doesn't invent impossible actions (build_9 fix). the initial plan's token usage is
+    # attached to the first worker turn's metadata below (there is no standalone turn for it),
+    # so no per-call cost is lost.
+    initial_admissible = env.admissible_commands(info)
+    ep_plan, initial_plan_usage = thinker.plan(task_goal, obs, initial_admissible, model=model)
 
     done = False
     current_obs = obs
+    pending_plan_usage = initial_plan_usage  # rolled into the next worker turn's metadata
 
-    while not done and env_step < MAX_STEPS:
+    while not done and env_step < max_steps:
         admissible = env.admissible_commands(info)
 
         # a stagnation trigger drives both the "stagnation" and "mask" modes
@@ -98,7 +111,7 @@ def run_episode(
             should_replan = stagnation_triggered
 
         if should_replan:
-            new_plan = thinker.replan(task_goal, ep_plan, action_history, current_obs, model=model)
+            new_plan, replan_usage = thinker.replan(task_goal, ep_plan, action_history, current_obs, admissible, model=model)
             turns.append(Turn(
                 step=env_step,
                 role="thinker",
@@ -107,7 +120,7 @@ def run_episode(
                 obs_after="",
                 env_reward=0.0,
                 done=False,
-                metadata={"type": "replan", "trigger": replan_mode, "old_plan": ep_plan},
+                metadata={"type": "replan", "trigger": replan_mode, "old_plan": ep_plan, "usage": replan_usage},
             ))
             ep_plan = new_plan
             steps_since_replan = 0
@@ -128,15 +141,19 @@ def run_episode(
                     masked_action = None
 
         # worker: select and execute one action (from the possibly-masked admissible set)
-        chosen = worker.act(task_goal, ep_plan, current_obs, worker_admissible, action_history, model=model)
+        chosen, worker_usage = worker.act(task_goal, ep_plan, current_obs, worker_admissible, action_history, model=model, env_hint=env_hint)
         next_obs, reward, done, info = env.step(chosen)
         env_step += 1
         steps_since_replan += 1
         action_history.append(chosen)
 
-        turn_metadata = {"admissible_commands": admissible}
+        turn_metadata = {"admissible_commands": admissible, "usage": worker_usage}
         if masked_action is not None:
             turn_metadata["masked_action"] = masked_action
+        # the initial plan has no turn of its own, so attach its usage to the first worker turn
+        if pending_plan_usage is not None:
+            turn_metadata["plan_usage"] = pending_plan_usage
+            pending_plan_usage = None
 
         turns.append(Turn(
             step=env_step,

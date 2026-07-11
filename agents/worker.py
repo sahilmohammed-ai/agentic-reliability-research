@@ -1,4 +1,4 @@
-from agents.llm import complete
+from agents.llm import complete_with_usage
 
 # worker picks the next action to take from available commands
 SYSTEM = """\
@@ -15,12 +15,20 @@ def act(
     admissible_commands: list[str],
     history: list[str] | None = None,
     model: str = "claude-haiku-4-5-20251001",
-) -> str:
-    """select one admissible command that best advances the plan."""
+    env_hint: str = "",
+) -> tuple[str, dict]:
+    """select one admissible command that best advances the plan.
+
+    returns (action, usage) where usage is the token counts for this call, so the runner can
+    log per-turn cost. env_hint is optional environment-specific guidance injected into the
+    prompt (e.g. a warning about scienceworld's irreversible 'focus on' action). empty for
+    alfworld, so the two environments stay comparable except where an env genuinely needs a caveat."""
     # optionally include last few actions for context
     history_block = ""
     if history:
         history_block = "Recent actions taken:\n" + "\n".join(f"- {a}" for a in history[-5:]) + "\n\n"
+
+    hint_block = f"{env_hint}\n\n" if env_hint else ""
 
     # format available commands into list
     commands_block = "\n".join(f"- {c}" for c in admissible_commands)
@@ -28,19 +36,20 @@ def act(
     prompt = (
         f"Task: {task_goal}\n\n"
         f"Plan:\n{plan}\n\n"
+        f"{hint_block}"
         f"{history_block}"
         f"Current observation:\n{obs}\n\n"
         f"Admissible commands:\n{commands_block}\n\n"
         "Choose one command from the list above:"
     )
-    raw = complete(model, SYSTEM, prompt, max_tokens=64)
+    raw, usage = complete_with_usage(model, SYSTEM, prompt, max_tokens=64)
 
     # match model's output format to actual command with fallback to first command
     raw_lower = raw.lower()
     for cmd in admissible_commands:
         if cmd.lower() == raw_lower:
-            return cmd
+            return cmd, usage
     for cmd in admissible_commands:
         if cmd.lower() in raw_lower or raw_lower in cmd.lower():
-            return cmd
-    return admissible_commands[0]
+            return cmd, usage
+    return admissible_commands[0], usage

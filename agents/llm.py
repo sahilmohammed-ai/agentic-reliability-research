@@ -52,7 +52,19 @@ def is_ollama_model(model: str) -> bool:
 
 
 def complete(model: str, system: str, prompt: str, max_tokens: int) -> str:
-    """single-turn completion, routed to hf, ollama, or anthropic based on the model string."""
+    """single-turn completion, text only. thin wrapper over complete_with_usage for callers
+    that don't care about token counts."""
+    text, _ = complete_with_usage(model, system, prompt, max_tokens)
+    return text
+
+
+def complete_with_usage(model: str, system: str, prompt: str, max_tokens: int) -> tuple[str, dict]:
+    """single-turn completion returning (text, usage), routed to hf, ollama, or anthropic.
+
+    usage is {"prompt_tokens": int, "completion_tokens": int}. all three backends report these
+    natively (anthropic via message.usage, ollama via *_eval_count, hf via tensor lengths), so
+    the counts are exact per-backend rather than estimated. this is what lets us track cost /
+    token usage per rollout turn, the mentor-requested efficiency metric."""
     if is_hf_model(model):
         repo_id = model[len("hf:"):]
         hf_model, tokenizer, device = _get_hf_model(repo_id)
@@ -77,7 +89,9 @@ def complete(model: str, system: str, prompt: str, max_tokens: int) -> str:
         # slice off the prompt tokens, only decode what the model actually generated
         prompt_len = encoded["input_ids"].shape[1]
         generated = output_ids[0, prompt_len:]
-        return tokenizer.decode(generated, skip_special_tokens=True).strip()
+        text = tokenizer.decode(generated, skip_special_tokens=True).strip()
+        usage = {"prompt_tokens": int(prompt_len), "completion_tokens": int(generated.shape[0])}
+        return text, usage
 
     if is_ollama_model(model):
         response = ollama.chat(
@@ -88,7 +102,12 @@ def complete(model: str, system: str, prompt: str, max_tokens: int) -> str:
             ],
             options={"num_predict": max_tokens},
         )
-        return response["message"]["content"].strip()
+        # ollama returns token counts as prompt_eval_count / eval_count (absent on rare edge cases)
+        usage = {
+            "prompt_tokens": int(response.get("prompt_eval_count", 0)),
+            "completion_tokens": int(response.get("eval_count", 0)),
+        }
+        return response["message"]["content"].strip(), usage
 
     message = _get_anthropic_client().messages.create(
         model=model,
@@ -96,4 +115,8 @@ def complete(model: str, system: str, prompt: str, max_tokens: int) -> str:
         system=system,
         messages=[{"role": "user", "content": prompt}],
     )
-    return message.content[0].text.strip()
+    usage = {
+        "prompt_tokens": int(message.usage.input_tokens),
+        "completion_tokens": int(message.usage.output_tokens),
+    }
+    return message.content[0].text.strip(), usage

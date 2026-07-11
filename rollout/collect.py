@@ -29,6 +29,9 @@ def _make_env(env_name: str, split: str):
     elif env_name == "scienceworld":
         from envs.scienceworld_env import ScienceWorldEnvWrapper
         return ScienceWorldEnvWrapper(split=split)
+    elif env_name == "textworldexpress":
+        from envs.textworldexpress_env import TextWorldExpressEnvWrapper
+        return TextWorldExpressEnvWrapper(split=split)
     raise ValueError(f"unknown env: {env_name}")
 
 
@@ -81,7 +84,7 @@ if __name__ == "__main__":
              "mask: stagnation replan plus single-turn masking of the most-repeated action (build_8).",
     )
     parser.add_argument(
-        "--env", type=str, default="alfworld", choices=["alfworld", "scienceworld"],
+        "--env", type=str, default="alfworld", choices=["alfworld", "scienceworld", "textworldexpress"],
         help="which agentic environment to collect from.",
     )
     args = parser.parse_args()
