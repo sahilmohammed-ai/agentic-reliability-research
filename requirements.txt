@@ -143,3 +143,4 @@ yarl==1.24.2
 zstandard==0.25.0
 py4j==0.10.9.9
 scienceworld==1.2.3
+textworld-express==1.1.0
