@@ -83,12 +83,19 @@ def run_episode(
     # the method contribute no hint, so alfworld is unaffected.
     env_hint = env.worker_hint() if hasattr(env, "worker_hint") else ""
 
-    # thinker: generate plan once at episode start, showing it the real command vocabulary so
-    # it doesn't invent impossible actions (build_9 fix). the initial plan's token usage is
+    # thinker: generate plan once at episode start. the initial plan's token usage is
     # attached to the first worker turn's metadata below (there is no standalone turn for it),
     # so no per-call cost is lost.
-    initial_admissible = env.admissible_commands(info)
-    ep_plan, initial_plan_usage = thinker.plan(task_goal, obs, initial_admissible, model=model)
+    #
+    # note: an earlier attempt (build_11) showed the thinker the admissible command list here,
+    # to stop it inventing impossible actions (seen in build_9's textworldexpress run). that
+    # fixed invented-command errors but, on alfworld, measurably hurt commonsense reasoning:
+    # net -7 rescued/broken vs build_8, because long enumerated lists (e.g. 10+ "go to cabinet
+    # N" entries) crowded out the thinker's world-knowledge guesses (e.g. "mugs are usually on
+    # the countertop") in favor of picking arbitrarily from the list. reverted; see build_11
+    # analysis. worth revisiting with a lighter-weight vocabulary hint (verbs only, not every
+    # object instance) rather than the full raw list.
+    ep_plan, initial_plan_usage = thinker.plan(task_goal, obs, model=model)
 
     done = False
     current_obs = obs
@@ -111,7 +118,7 @@ def run_episode(
             should_replan = stagnation_triggered
 
         if should_replan:
-            new_plan, replan_usage = thinker.replan(task_goal, ep_plan, action_history, current_obs, admissible, model=model)
+            new_plan, replan_usage = thinker.replan(task_goal, ep_plan, action_history, current_obs, model=model)
             turns.append(Turn(
                 step=env_step,
                 role="thinker",
