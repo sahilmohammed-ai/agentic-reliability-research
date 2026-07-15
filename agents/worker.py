@@ -16,19 +16,27 @@ def act(
     history: list[str] | None = None,
     model: str = "claude-haiku-4-5-20251001",
     env_hint: str = "",
+    reconsider: bool = False,
 ) -> tuple[str, dict]:
     """select one admissible command that best advances the plan.
 
     returns (action, usage) where usage is the token counts for this call, so the runner can
     log per-turn cost. env_hint is optional environment-specific guidance injected into the
     prompt (e.g. a warning about scienceworld's irreversible 'focus on' action). empty for
-    alfworld, so the two environments stay comparable except where an env genuinely needs a caveat."""
+    alfworld, so the two environments stay comparable except where an env genuinely needs a caveat.
+    reconsider is the coordinator's cheapest intervention (the "retry" action): no thinker call,
+    just an extra nudge in the prompt that the last action did not seem to help."""
     # optionally include last few actions for context
     history_block = ""
     if history:
         history_block = "Recent actions taken:\n" + "\n".join(f"- {a}" for a in history[-5:]) + "\n\n"
 
     hint_block = f"{env_hint}\n\n" if env_hint else ""
+    if reconsider:
+        hint_block += (
+            "Your last action does not seem to have made progress. Reconsider carefully before "
+            "choosing again, avoid repeating an action that already failed to help.\n\n"
+        )
 
     # format available commands into list
     commands_block = "\n".join(f"- {c}" for c in admissible_commands)

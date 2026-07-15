@@ -42,18 +42,29 @@ def collect(
     model: str = DEFAULT_MODEL,
     replan_mode: str = "interval",
     env_name: str = "alfworld",
+    verifier_checkpoint: str | None = None,
 ) -> None:
-    """collect n rollout trajectories and save as json files."""
+    """collect n rollout trajectories and save as json files.
+
+    verifier_checkpoint is required when replan_mode == "verifier" (coordinator v0): a directory
+    containing a trained verifier.pt, e.g. "checkpoints/verifier_v2"."""
     # create output directory and initialize environment
     os.makedirs(out_dir, exist_ok=True)
     env = _make_env(env_name, split)
+
+    verifier = None
+    if replan_mode == "verifier":
+        if not verifier_checkpoint:
+            raise ValueError('--replan-mode verifier requires --verifier-checkpoint <dir>')
+        from verifier.infer import Verifier
+        verifier = Verifier(verifier_checkpoint)
 
     won_count = 0
     for i in range(n):
         # run one episode and record trajectory
         task_id = f"{split}_{i:04d}"
         t0 = time.time()
-        traj = run_episode(env, task_id=task_id, model=model, replan_mode=replan_mode)
+        traj = run_episode(env, task_id=task_id, model=model, replan_mode=replan_mode, verifier=verifier)
         elapsed = time.time() - t0
 
         # save trajectory to json file
@@ -79,13 +90,19 @@ if __name__ == "__main__":
     parser.add_argument("--split", type=str, default="train", choices=["train", "eval_id", "eval_ood"])
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL, help="model used for both thinker and worker")
     parser.add_argument(
-        "--replan-mode", type=str, default="interval", choices=["interval", "stagnation", "mask"],
+        "--replan-mode", type=str, default="interval",
+        choices=["interval", "stagnation", "mask", "verifier"],
         help="interval: replan every N steps (build_6). stagnation: replan when stuck (build_7). "
-             "mask: stagnation replan plus single-turn masking of the most-repeated action (build_8).",
+             "mask: stagnation replan plus single-turn masking of the most-repeated action (build_8). "
+             "verifier: coordinator v0, live-verifier-driven continue/retry/replan/backtrack/escalate.",
     )
     parser.add_argument(
         "--env", type=str, default="alfworld", choices=["alfworld", "scienceworld", "textworldexpress"],
         help="which agentic environment to collect from.",
     )
+    parser.add_argument(
+        "--verifier-checkpoint", type=str, default=None,
+        help="directory with a trained verifier.pt, required for --replan-mode verifier.",
+    )
     args = parser.parse_args()
-    collect(args.n, args.out, args.split, args.model, args.replan_mode, args.env)
+    collect(args.n, args.out, args.split, args.model, args.replan_mode, args.env, args.verifier_checkpoint)
