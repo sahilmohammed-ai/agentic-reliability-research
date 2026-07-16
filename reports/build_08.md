@@ -29,10 +29,4 @@ Because aggregate win rate hides churn (a change can rescue some tasks while bre
 
 The build_7 comparison is the clean one: adding masking on top of build_7's replanning rescued 5 more tasks and broke zero previously-won tasks. This directly addresses the concern that a new intervention might sacrifice easy wins to chase hard ones, masking did not.
 
-**Notes:**
-- Masking is the first intervention that beat the no-replan baseline by a clear margin. For context on churn: build_6 (interval replan) was rescued 6 / broke 6, net 0 -- pure churn, its "18%" was a different 18% than baseline. build_7 was +3. build_8 is +8 vs baseline and +5 vs build_7 with zero regressions.
-- Interpretation: a hard, deterministic intervention (remove the repeated action, worker cannot ignore it) outperforms every soft, suggestion-based intervention (replanning) tried so far. The type of intervention matters more than its timing, timing was already ruled out in build_7.
-- Confound to be honest about: build_8 fires masking AND replanning together, so it does not isolate masking's marginal contribution from replanning's. The build_8-vs-build_7 comparison (+5, broke 0) is the closest isolation available, since build_7 already had the replan and build_8 only adds masking on top, but a true mask-only (no replan) arm would nail it down.
-- Three tasks (44, 69, 83) are broken by build_6, build_7, AND build_8 vs baseline -- a persistent "intervention hurts this task" set worth understanding later, not a masking-specific regression.
-- Still every loss burns all 50 steps; masking breaks specific loops but does not make hopeless tasks winnable, consistent with the earlier finding that ~66% of tasks are lost by every coordinator variant (largely capability failures on multi-step heat/cool/clean tasks the 3B worker cannot execute).
-- Next: test whether this masking advantage generalizes to a different environment (ScienceWorld), the first cross-environment test.
+

@@ -21,8 +21,3 @@
 - Won episodes averaged 10.5 steps; lost averaged 21.7
 - 89 mask events fired
 - Tokens: 456,448 prompt + 17,318 completion = 473,766 total, avg ~4,738 tokens/episode
-
-**Notes:**
-- Win rate (81%) is dramatically higher than ALFWorld's 26% (build_8, same config), matching TALES's prediction that these games are largely solvable by a 3B model. The 3B worker is genuinely competent here, unlike in ScienceWorld (0%).
-- This is a very different capability regime, and it has a consequence: with only 19 losses, there is little failure left for the reliability layer to convert to wins. The rescued/broken transition analysis that made ALFWorld compelling has far less signal here. TextWorldExpress is better framed as a generalization/robustness check and a cost-efficiency testbed than as a second "can the layer rescue failures" test.
-- Failure split among the 19 losses: 11 ended in <=2 steps (9 of them in a single step), and 8 entered a stuck loop and ran to the 50-step cap. So more than half the losses are instant fails, not oscillation.
