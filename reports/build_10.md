@@ -19,8 +19,3 @@
 - TextWorldExpress: 500 episodes, 377 won (75.4%), 123 lost. Won averaged 9.1 steps. Only 50 of 123 losses hit the step cap, the rest ended early.
 - Combined: 1,000 episodes, 27,459 labeled worker turns (21,399 ALFWorld, 6,060 TextWorldExpress) after running rollout.label on both and merging into data/labeled/build_10_combined.
 
-**Notes:**
-- ALFWorld's win rate (20.4%) and all-losses-hit-cap pattern is consistent with every prior ALFWorld build. TextWorldExpress's much higher win rate (75.4%) and partial early-termination pattern reflects the easier task set (coin/simonsays/peckingorder, chosen because TALES shows a 3B model solves these at a real, high rate).
-- This was a deliberate scope decision: verifier v1 trains on ALFWorld + TextWorldExpress only, not a third environment. WebShop was considered but its free-text search[...] action space does not fit the current admissible-command-list worker design, and building that harness redesign was explicitly deferred rather than blocking verifier training on it.
-- Combining the two labeled sets required prefixing filenames (both environments independently number files train_0000 through train_0499), otherwise the second copy silently overwrote the first.
-- This dataset directly supersedes an earlier, smaller ALFWorld-only labeled set that was used to train a first verifier checkpoint whose weights were never downloaded from the training Studio and are now considered lost/irrelevant. Build 10 is the first labeled dataset behind a verifier checkpoint that was actually retrieved and used.

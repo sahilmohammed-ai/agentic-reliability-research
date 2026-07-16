@@ -25,9 +25,18 @@ def build_input_text(task_goal: str, plan: str, obs_before: str, action: str) ->
 
 
 def load_examples(labeled_dir: str) -> list[dict]:
-    """flatten every worker turn across all trajectory files into one list of examples."""
+    """flatten every worker turn across all trajectory files into one list of examples.
+
+    each example carries "episode_id" (the source file's basename) and "task_goal" alongside the
+    usual text/q_value/advantage, so callers can group-split by episode (never separate turns from
+    the same episode across train/val) and stratify by task_goal (keep each task template's episodes
+    proportionally represented in both splits, rather than a flat random split which leaks turns from
+    one episode across train/val -- confirmed via direct data audit that consecutive turns within an
+    episode share near-identical text, so a turn-level split was measuring memorization, not
+    generalization. see verifier/train.py's stratified_group_split())."""
     examples = []
     for path in sorted(glob.glob(os.path.join(labeled_dir, "*.json"))):
+        episode_id = os.path.basename(path)
         with open(path) as f:
             traj = json.load(f)
 
@@ -42,6 +51,8 @@ def load_examples(labeled_dir: str) -> list[dict]:
                 "text": build_input_text(traj["task_goal"], traj["plan"], turn["obs_before"], turn["action"]),
                 "q_value": turn["q_value"],
                 "advantage": turn["advantage"],
+                "episode_id": episode_id,
+                "task_goal": traj["task_goal"],
             })
 
     return examples

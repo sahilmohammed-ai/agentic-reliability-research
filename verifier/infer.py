@@ -2,9 +2,9 @@
 live verifier inference: load a trained checkpoint and score a single turn's q_value/advantage
 in real time. no training loop, no gradients, no dataloader, just one forward pass per call.
 
-this is the missing piece for the coordinator: rollout/train.py only ever used the verifier
-for offline training so far. the coordinator's action toolkit (continue/retry/replan/backtrack/
-escalate) needs a live signal to react to during a rollout, which is what this module provides.
+score() and score_batch() give a live per-turn signal for anything that needs to react to a
+rollout in progress (e.g. best-of-n / verifier-guided search), independent of any particular
+coordination mechanism consuming it.
 """
 
 import os

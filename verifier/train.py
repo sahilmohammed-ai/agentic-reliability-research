@@ -7,10 +7,12 @@ loss: L_Q + beta * L_A (q-value weighted higher, advantage secondary).
 import argparse
 import functools
 import os
+import random
+from collections import defaultdict
 
 import torch
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from transformers import AutoTokenizer
 
 from verifier.dataset import VerifierDataset, collate_fn, load_examples
@@ -29,6 +31,54 @@ LEARNING_RATE = 1e-3    # frozen mode default (use --lr ~1e-5 for full fine-tune
 NUM_EPOCHS = 3
 VAL_FRACTION = 0.1      # held-out validation data
 LOG_EVERY = 200         # progress logging frequency
+
+
+def stratified_group_split(
+    examples: list[dict], val_fraction: float = VAL_FRACTION, seed: int = 42
+) -> tuple[list[int], list[int]]:
+    """split example indices into (train_indices, val_indices), grouped by episode_id and
+    stratified by task_goal, so no episode's turns are ever split across train/val (the bug this
+    replaces: turn-level random_split let consecutive, near-identical turns from the same episode
+    leak across the split, so val loss was measuring memorization, not generalization -- the same
+    failure mode scikit-learn's GroupKFold/GroupShuffleSplit exist to prevent).
+
+    stratified by task_goal (not just grouped by episode) so each task template's episodes are
+    proportionally divided rather than left to chance: with ~372 templates across 500 episodes,
+    many templates have only 1-2 episodes, and a template with a single episode is assigned
+    entirely to train (a template can't be "proportionally split" with one member, and pulling it
+    into val would only add an untestable, high-variance singleton rather than a stable validation
+    signal -- full template-level holdout was considered and rejected for the same reason at a
+    larger scale: too few independent groups for a validation loss trustworthy enough to drive
+    epoch-to-epoch early stopping).
+
+    known residual limitation, not fixed here: alfworld reuses a small pool of underlying room
+    layouts across different task_goals, so two episodes with different task_goal strings can still
+    share a very similar observation-text distribution. episode/task_goal grouping fixes the
+    within-episode leak (the confirmed, measured problem) but does not guarantee zero train/val
+    similarity from shared room layouts, since scene/floorplan id is not currently captured
+    anywhere in collected trajectory data (would need a rollout/envs/alfworld_env.py change to fix
+    for future collections)."""
+    by_task: dict[str, list[str]] = defaultdict(list)  # task_goal -> [episode_id, ...] (deduped)
+    episode_task: dict[str, str] = {}
+    for ex in examples:
+        eid, task = ex["episode_id"], ex["task_goal"]
+        episode_task[eid] = task
+    for eid, task in episode_task.items():
+        by_task[task].append(eid)
+
+    rng = random.Random(seed)
+    val_episodes: set[str] = set()
+    for task, episodes in by_task.items():
+        if len(episodes) < 2:
+            continue  # singleton-template episodes go entirely to train, see docstring
+        episodes = sorted(episodes)
+        rng.shuffle(episodes)
+        n_val = max(1, round(len(episodes) * val_fraction))
+        val_episodes.update(episodes[:n_val])
+
+    train_indices = [i for i, ex in enumerate(examples) if ex["episode_id"] not in val_episodes]
+    val_indices = [i for i, ex in enumerate(examples) if ex["episode_id"] in val_episodes]
+    return train_indices, val_indices
 
 
 def get_device() -> torch.device:
@@ -105,10 +155,13 @@ def train(
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
     dataset = VerifierDataset(examples, tokenizer, max_length=max_length)
 
-    # train/val split and dataloaders
-    val_size = int(len(dataset) * VAL_FRACTION)
-    train_size = len(dataset) - val_size
-    train_set, val_set = random_split(dataset, [train_size, val_size])
+    # train/val split: stratified-group by (episode_id, task_goal), not a flat turn-level random
+    # split, so no episode's turns are split across train/val. see stratified_group_split()'s
+    # docstring for why (confirmed group-leakage bug in the previous random_split(dataset, ...)
+    # approach) and what it still doesn't cover (residual alfworld scene-reuse risk).
+    train_indices, val_indices = stratified_group_split(examples, VAL_FRACTION)
+    train_set = Subset(dataset, train_indices)
+    val_set = Subset(dataset, val_indices)
 
     collate = functools.partial(collate_fn, pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id)
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, collate_fn=collate)

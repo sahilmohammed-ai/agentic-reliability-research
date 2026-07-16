@@ -15,10 +15,17 @@ _hf_cache: dict[str, tuple] = {}  # repo_id -> (model, tokenizer), loaded once p
 
 
 def _get_anthropic_client() -> anthropic.Anthropic:
-    """lazy init and cache the anthropic client."""
+    """lazy init and cache the anthropic client.
+
+    max_retries=10 (SDK default is 2). a real collection run hit repeated transient
+    529 OverloadedError responses; confirmed directly (isolated single calls to the same model
+    succeeded reliably, a 10-call burst hit one real 529 that survived 5 retries with exponential
+    backoff) that this is genuine bursty overload on anthropic's side, not a bug here -- the SDK
+    already retries 429/5xx/timeout errors with exponential backoff by default (see
+    BaseClient._should_retry), max_retries just wasn't a high enough budget to reliably outlast it."""
     global _anthropic_client
     if _anthropic_client is None:
-        _anthropic_client = anthropic.Anthropic()
+        _anthropic_client = anthropic.Anthropic(max_retries=10)
     return _anthropic_client
 
 
