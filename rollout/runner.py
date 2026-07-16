@@ -196,10 +196,13 @@ def run_episode(
                 ep_plan = new_plan
 
             elif coordinator_action == "backtrack":
-                # discard stale action-history context (it is what's misleading the thinker/
-                # worker) and plan fresh from the current real state, rather than revising the
-                # existing plan the way replan does.
-                action_history = []
+                # get a completely fresh plan from the current real state (thinker.plan(), not
+                # thinker.replan()'s revise-in-place), rather than revising the existing plan the
+                # way replan does. does NOT clear action_history: an earlier version did, but that
+                # discarded the worker's memory of what it already tried (e.g. "already opened
+                # this drawer, it was empty"), which visibly caused it to re-thrash through the
+                # same failed sequence right after backtracking (see rollout/coordinator.py's
+                # module docstring, build_11 diagnosis).
                 new_plan, plan_usage = thinker.plan(task_goal, current_obs, model=model)
                 turns.append(Turn(
                     step=env_step, role="thinker", obs_before=current_obs, action=new_plan,

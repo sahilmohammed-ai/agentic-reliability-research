@@ -24,6 +24,29 @@ also trigger on literal action repetition (the same check rollout/runner.py's ma
 modes already use), independent of the q-value streak. either condition alone is enough to
 trigger escalation, so the coordinator catches both "the verifier thinks this is failing" and
 "the worker is visibly stuck" even when the verifier's per-turn score does not reflect the latter.
+
+FOUND BROKEN in build_11 (50-episode alfworld run, 9/50 won vs build_10's 20.4% baseline), FIXED
+2026-07-16 (see reports/build_11.md for the full trace-level diagnosis, reports/build_12.md for
+the re-test): the streak had no decay and no ceiling. normal mid-episode turns routinely score
+0.01-0.09 (the offline calibration this threshold was picked from was dominated by short episodes
+scored near their final winning action, not representative of a typical middle turn), so streak>=5
+was reached by turn 6-9 in nearly every real episode, and a single low-but-typical turn thereafter
+was enough to prevent the streak from ever fully unwinding back to "continue" (needed 5+
+CONSECUTIVE healthy turns). in practice escalate became the effectively permanent state for the
+rest of any episode past ~10 steps (confirmed: 39.7% of all build_11 worker turns were "escalate",
+identical rate in won vs lost episodes). worse, backtrack's `action_history = []` side effect
+(rollout/runner.py) discarded the worker's memory of what it already tried, visibly inducing
+thrashing (open/close/examine loops) that the verifier then correctly scored as low, re-triggering
+the same streak that caused the thrashing in the first place.
+
+fix: (1) low_q_streak now DECREMENTS on a healthy turn instead of resetting to 0, so recovery is
+gradual rather than needing a perfect run of 5 consecutive good turns; (2) backtrack no longer
+clears action_history, so a fresh plan can route around already-tried actions instead of the
+worker blindly repeating them. Q_THRESHOLD (0.10) and the five-tier action ladder itself are
+unchanged; whether turn-level q-value can reliably drive this kind of detection at all remains an
+open question (checked this session: neither a fixed threshold nor a trailing-average trend signal
+cleanly separated real loops from normal turns on build_11's data, precision 30-42%, recall
+23-40% either way) -- out of scope for this fix, revisit if build_12 still underperforms.
 """
 
 from collections import Counter
@@ -75,11 +98,14 @@ class VerifierCoordinator:
         self.last_advantage = advantage
 
         # either signal alone bumps the streak: a low verifier score, or literal repetition
-        # the verifier's per-turn score can't see (see module docstring).
+        # the verifier's per-turn score can't see (see module docstring). a healthy turn
+        # DECREMENTS rather than resets to 0: normal mid-episode turns routinely score below
+        # Q_THRESHOLD even in winning episodes, so a hard reset made recovery need 5+ perfect
+        # consecutive turns, which almost never happens (see FIXED note below).
         if q_value < Q_THRESHOLD or _is_repeating(action_history):
             self.low_q_streak += 1
         else:
-            self.low_q_streak = 0
+            self.low_q_streak = max(0, self.low_q_streak - 1)
 
         return q_value, advantage
 
