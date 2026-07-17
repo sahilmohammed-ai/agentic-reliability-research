@@ -7,8 +7,9 @@ heuristic coordinator (interval/stagnation/mask modes) and a verifier-driven "co
 (rollout/coordinator.py, continue/retry/replan/backtrack/escalate action toolkit) -- both were
 removed in favor of isolating what the Thinker/Worker models alone contribute, with zero
 coordination confounds. history of that work (streak-decay fixes, the escalate-frequency
-investigation, build_11/build_12's diagnosis) is kept in reports/build_11.md, reports/build_12.md,
-and .info/BUILD_11_12_DIAGNOSIS.md as historical record, not reflected in this file anymore.
+investigation, build_11/build_12's diagnosis) is kept in reports/old/build_11.md,
+reports/old/build_12.md, and .info/BUILD_11_12_DIAGNOSIS.md as historical record, not reflected
+in this file anymore.
 """
 
 import uuid
