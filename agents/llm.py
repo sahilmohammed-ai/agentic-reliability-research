@@ -126,4 +126,10 @@ def complete_with_usage(model: str, system: str, prompt: str, max_tokens: int) -
         "prompt_tokens": int(message.usage.input_tokens),
         "completion_tokens": int(message.usage.output_tokens),
     }
-    return message.content[0].text.strip(), usage
+    # message.content[0] is not always the text block -- some models (confirmed: claude-sonnet-5)
+    # can return a ThinkingBlock before the TextBlock even without extended thinking explicitly
+    # requested, so blindly indexing [0] broke here. find the actual text block instead.
+    text_blocks = [block.text for block in message.content if block.type == "text"]
+    if not text_blocks:
+        raise ValueError(f"no text block in response from {model}: {message.content!r}")
+    return text_blocks[0].strip(), usage
