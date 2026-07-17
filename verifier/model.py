@@ -7,7 +7,14 @@ import torch
 import torch.nn as nn
 from transformers import AutoModel
 
-BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
+# switched from Qwen2.5-3B-Instruct to 1.5B for verifier v2 (2026-07-17): the verifier only
+# outputs 2 scalars per turn, and inference cost scales with backbone size regardless of
+# frozen/unfrozen (freeze_backbone only cuts TRAINING cost, not inference FLOPs -- a distinction
+# that had this deferred until now). hidden_size is read dynamically from the backbone's own
+# config below, so the value head resizes automatically (2048 -> 1536), no other code changes
+# needed. not yet validated that percentile separation (won vs lost turns) holds at this smaller
+# size -- that's the required check before trusting this checkpoint, see .info/CLAUDE.md.
+BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 class VerifierModel(nn.Module):
