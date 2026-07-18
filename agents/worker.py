@@ -58,7 +58,10 @@ def act(
         f"Admissible commands:\n{commands_block}\n\n"
         "Choose one command from the list above:"
     )
-    raw, usage = complete_with_usage(model, SYSTEM, prompt, max_tokens=64)
+    # max_tokens=1024: claude-sonnet-5 sometimes thinks before answering on longer prompts (this
+    # one includes the full admissible-commands list + history), and a too-small budget can get
+    # entirely consumed by thinking with no room left for the actual answer.
+    raw, usage = complete_with_usage(model, SYSTEM, prompt, max_tokens=1024)
 
     # match model's output format to actual command. previously the raw output and whether a
     # fallback fired were both discarded, so it was impossible to tell "the model genuinely chose

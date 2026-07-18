@@ -14,10 +14,26 @@ if "JAVA_HOME" not in os.environ and os.path.isdir(_DEFAULT_JAVA_HOME):
 STEP_LIMIT = 50  # coin/simonsays/peckingorder are short-horizon, alfworld-comparable
 
 # games chosen because TALES shows a frozen ~3b model solves them 80-100% (a real substrate
-# for the reliability layer to improve). deliberately EXCLUDES "sorting" (instant-death on a
+# for the reliability layer to improve). deliberately EXCLUDED "sorting" (instant-death on a
 # wrong move, the same trap that made scienceworld unusable) and the harder cooking/twc/
 # mapreader/arithmetic games (near-0% for a 3b model, no substrate to measure).
+#
+# re-examined 2026-07-18 with claude-sonnet-5 as worker/thinker instead of a frozen 3b model:
+# simonsays is now nearly solved (97% win rate, 50-episode sample) -- little failure signal left
+# for a frontier model. HARDER_GAMES below (previously excluded for being near-0% for 3b) were
+# tested as a candidate now that the worker model is far stronger. "sorting" stays excluded
+# regardless of model strength: instant-death on a wrong move is a property of the environment,
+# not a capability gap (same reasoning that disqualified scienceworld's "focus on X").
+#
+# twc re-tested at step_limit=100 (double default) to rule out a horizon issue: still 0/10 won,
+# and trace inspection shows why -- the agent repeats the SAME wrong object placement verbatim
+# (e.g. razor -> dressing table, penalized -0.125) for the full 100 steps with zero within-episode
+# adaptation to the penalty signal. this is a genuine comprehension/adaptation gap, not a
+# step-limit problem, but it's a narrow, repetitive failure signature (one wrong guess repeated)
+# rather than diverse failure modes -- dropped from the training mix on that basis.
+TRAINING_GAMES = ("coin", "simonsays", "peckingorder", "cookingworld", "mapreader")
 DEFAULT_GAMES = ("coin", "simonsays", "peckingorder")
+HARDER_GAMES = ("cookingworld", "twc", "mapreader", "arithmetic")
 # modest game params keep the tasks in the tractable range for a small worker
 _GAME_PARAMS = {
     "coin": "numLocations=5,numDistractorItems=3",

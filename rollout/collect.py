@@ -23,9 +23,13 @@ from rollout.runner import run_episode, DEFAULT_MODEL
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "alfworld_base.yaml")
 
 
-def _make_env(env_name: str, split: str):
+def _make_env(env_name: str, split: str, twx_games: tuple[str, ...] | None = None):
     """construct the requested environment wrapper. imports are local so a run that only
-    uses one env doesn't pay the other's import cost (alfworld and scienceworld are both heavy)."""
+    uses one env doesn't pay the other's import cost (alfworld and scienceworld are both heavy).
+
+    twx_games overrides textworldexpress's default game set (coin/simonsays/peckingorder), e.g.
+    to test the previously-3b-excluded harder games (cookingworld/twc/mapreader/arithmetic) with
+    a stronger worker model. ignored for other envs."""
     if env_name == "alfworld":
         from envs.alfworld_env import AlfWorldEnv
         return AlfWorldEnv(CONFIG_PATH, split=split)
@@ -33,8 +37,8 @@ def _make_env(env_name: str, split: str):
         from envs.scienceworld_env import ScienceWorldEnvWrapper
         return ScienceWorldEnvWrapper(split=split)
     elif env_name == "textworldexpress":
-        from envs.textworldexpress_env import TextWorldExpressEnvWrapper
-        return TextWorldExpressEnvWrapper(split=split)
+        from envs.textworldexpress_env import TextWorldExpressEnvWrapper, DEFAULT_GAMES
+        return TextWorldExpressEnvWrapper(split=split, games=twx_games or DEFAULT_GAMES)
     raise ValueError(f"unknown env: {env_name}")
 
 
@@ -44,11 +48,12 @@ def collect(
     split: str = "train",
     model: str = DEFAULT_MODEL,
     env_name: str = "alfworld",
+    twx_games: tuple[str, ...] | None = None,
 ) -> None:
     """collect n rollout trajectories (zero-coordination baseline) and save as json files."""
     # create output directory and initialize environment
     os.makedirs(out_dir, exist_ok=True)
-    env = _make_env(env_name, split)
+    env = _make_env(env_name, split, twx_games)
 
     won_count = 0
     for i in range(n):
@@ -84,5 +89,12 @@ if __name__ == "__main__":
         "--env", type=str, default="alfworld", choices=["alfworld", "scienceworld", "textworldexpress"],
         help="which agentic environment to collect from.",
     )
+    parser.add_argument(
+        "--twx-games", type=str, default=None,
+        help="comma-separated textworldexpress game names to override the default "
+             "coin/simonsays/peckingorder set, e.g. --twx-games cookingworld,twc,mapreader,arithmetic. "
+             "ignored for other envs.",
+    )
     args = parser.parse_args()
-    collect(args.n, args.out, args.split, args.model, args.env)
+    twx_games = tuple(args.twx_games.split(",")) if args.twx_games else None
+    collect(args.n, args.out, args.split, args.model, args.env, twx_games)
