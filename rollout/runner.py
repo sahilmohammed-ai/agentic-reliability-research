@@ -15,7 +15,7 @@ in this file anymore.
 import uuid
 
 from envs.alfworld_env import AlfWorldEnv
-from agents import thinker, worker
+from agents import single_agent, thinker, worker
 from rollout.schemas import Turn, Trajectory
 
 # same model used for both thinker and worker in a given run, swapped per performance test
@@ -98,6 +98,61 @@ def run_episode(
         task_id=task_id,
         task_goal=task_goal,
         plan=ep_plan,
+        turns=turns,
+        won=env.won(info),
+        total_steps=env_step,
+    )
+
+
+def run_single_agent_episode(
+    env: AlfWorldEnv,
+    task_id: str | None = None,
+    model: str = DEFAULT_MODEL,
+) -> Trajectory:
+    """run one episode with a single model acting alone, no thinker plan, no coordination.
+    the true single-model capability baseline: one call per step, goal+obs+admissible commands
+    in, one action out. distinct from run_episode's thinker+worker agentic loop above."""
+    task_id = task_id or str(uuid.uuid4())[:8]
+    turns: list[Turn] = []
+    action_history: list[str] = []
+    env_step = 0
+
+    max_steps = getattr(env, "step_limit", MAX_STEPS)
+
+    obs, info = env.reset()
+    task_goal = env.task_goal(obs, info)
+    env_hint = env.worker_hint() if hasattr(env, "worker_hint") else ""
+
+    done = False
+    current_obs = obs
+
+    while not done and env_step < max_steps:
+        admissible = env.admissible_commands(info)
+
+        chosen, usage = single_agent.act(
+            task_goal, current_obs, admissible, action_history,
+            model=model, env_hint=env_hint,
+        )
+        next_obs, reward, done, info = env.step(chosen)
+        env_step += 1
+        action_history.append(chosen)
+
+        turns.append(Turn(
+            step=env_step,
+            role="worker",
+            obs_before=current_obs,
+            action=chosen,
+            obs_after=next_obs,
+            env_reward=reward,
+            done=done,
+            metadata={"admissible_commands": admissible, "usage": usage},
+        ))
+        current_obs = next_obs
+
+    return Trajectory(
+        task_id=task_id,
+        task_goal=task_goal,
+        plan="",  # no thinker plan in the single-agent baseline
         turns=turns,
         won=env.won(info),
         total_steps=env_step,

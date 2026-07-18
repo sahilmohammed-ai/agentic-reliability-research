@@ -1,17 +1,27 @@
 import anthropic
 import ollama
+import openai
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# three backends, routed by model string shape:
+# four backends, routed by model string shape:
 #   - "hf:<repo_id>" (e.g. "hf:Qwen/Qwen2.5-3B-Instruct") -> local hf transformers, full
 #     precision, same weights verifier/model.py trains on. explicit prefix rather than
 #     detecting the "/" in repo ids, so it can't collide with ollama or anthropic names.
 #   - anything else containing ":" (e.g. "qwen2.5:3b-instruct") -> ollama, gguf-quantized,
 #     served locally through the ollama daemon.
+#   - "gpt-*" -> openai api.
 #   - anything else (e.g. "claude-haiku-4-5-20251001") -> anthropic api.
 _anthropic_client = None
+_openai_client = None
 _hf_cache: dict[str, tuple] = {}  # repo_id -> (model, tokenizer), loaded once per process
+
+
+def _get_openai_client() -> openai.OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = openai.OpenAI(max_retries=10)
+    return _openai_client
 
 
 def _get_anthropic_client() -> anthropic.Anthropic:
@@ -56,6 +66,10 @@ def is_hf_model(model: str) -> bool:
 
 def is_ollama_model(model: str) -> bool:
     return ":" in model and not is_hf_model(model)
+
+
+def is_openai_model(model: str) -> bool:
+    return model.startswith("gpt-")
 
 
 def complete(model: str, system: str, prompt: str, max_tokens: int) -> str:
@@ -116,10 +130,28 @@ def complete_with_usage(model: str, system: str, prompt: str, max_tokens: int) -
         }
         return response["message"]["content"].strip(), usage
 
+    if is_openai_model(model):
+        response = _get_openai_client().chat.completions.create(
+            model=model,
+            max_completion_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        usage = {
+            "prompt_tokens": int(response.usage.prompt_tokens),
+            "completion_tokens": int(response.usage.completion_tokens),
+        }
+        return response.choices[0].message.content.strip(), usage
+
     # some models (confirmed: claude-sonnet-5) occasionally spend the whole response thinking
     # and never reach an answer, so the response has no text block at all. this isn't fixable by
     # raising max_tokens (still happens at 1024 on a long thinking block) -- just retry the call.
-    for attempt in range(3):
+    # confirmed this can fail 3 attempts in a row (build 02 collection), so retry count is raised
+    # and the caller (rollout/collect.py) also catches this to skip the episode rather than crash
+    # the whole batch.
+    for attempt in range(6):
         message = _get_anthropic_client().messages.create(
             model=model,
             max_tokens=max_tokens,
@@ -133,4 +165,4 @@ def complete_with_usage(model: str, system: str, prompt: str, max_tokens: int) -
                 "completion_tokens": int(message.usage.output_tokens),
             }
             return text_blocks[0].strip(), usage
-    raise ValueError(f"no text block in response from {model} after 3 attempts: {message.content!r}")
+    raise ValueError(f"no text block in response from {model} after 6 attempts: {message.content!r}")
