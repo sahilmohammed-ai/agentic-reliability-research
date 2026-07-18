@@ -116,20 +116,21 @@ def complete_with_usage(model: str, system: str, prompt: str, max_tokens: int) -
         }
         return response["message"]["content"].strip(), usage
 
-    message = _get_anthropic_client().messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    usage = {
-        "prompt_tokens": int(message.usage.input_tokens),
-        "completion_tokens": int(message.usage.output_tokens),
-    }
-    # message.content[0] is not always the text block -- some models (confirmed: claude-sonnet-5)
-    # can return a ThinkingBlock before the TextBlock even without extended thinking explicitly
-    # requested, so blindly indexing [0] broke here. find the actual text block instead.
-    text_blocks = [block.text for block in message.content if block.type == "text"]
-    if not text_blocks:
-        raise ValueError(f"no text block in response from {model}: {message.content!r}")
-    return text_blocks[0].strip(), usage
+    # some models (confirmed: claude-sonnet-5) occasionally spend the whole response thinking
+    # and never reach an answer, so the response has no text block at all. this isn't fixable by
+    # raising max_tokens (still happens at 1024 on a long thinking block) -- just retry the call.
+    for attempt in range(3):
+        message = _get_anthropic_client().messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text_blocks = [block.text for block in message.content if block.type == "text"]
+        if text_blocks:
+            usage = {
+                "prompt_tokens": int(message.usage.input_tokens),
+                "completion_tokens": int(message.usage.output_tokens),
+            }
+            return text_blocks[0].strip(), usage
+    raise ValueError(f"no text block in response from {model} after 3 attempts: {message.content!r}")

@@ -109,7 +109,8 @@ def plan(task_goal: str, initial_obs: str, model: str = "claude-haiku-4-5-202510
     """generate high-level plan from task goal and initial scene. returns (plan, usage)."""
     # build prompt with task and initial observation
     prompt = f"Task: {task_goal}\n\nScene:\n{initial_obs}\n\nPlan:"
-    return complete_with_usage(model, SYSTEM, prompt, max_tokens=256)
+    # max_tokens=1024: headroom for thinking-block content some models emit before the answer.
+    return complete_with_usage(model, SYSTEM, prompt, max_tokens=1024)
 
 
 def replan(
@@ -128,4 +129,4 @@ def replan(
         f"Current scene:\n{current_obs}\n\n"
         "New plan:"
     )
-    return complete_with_usage(model, REPLAN_SYSTEM, prompt, max_tokens=256)
+    return complete_with_usage(model, REPLAN_SYSTEM, prompt, max_tokens=1024)
