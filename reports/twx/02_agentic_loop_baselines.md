@@ -1,4 +1,4 @@
-# TWX 02 — Model Baselines
+# TWX 02 — Agentic Loop Baselines
 
 **Date:** 2026-07-18
 
@@ -45,28 +45,37 @@ Thinker + Worker both `hf:Qwen/Qwen2.5-3B-Instruct`.
 
 ## Cross-model comparison
 
-| game | Sonnet 5 (build 01, unstratified) | Opus 4.8 | GPT-5.4 | Qwen2.5-3B |
-|---|---|---|---|---|
-| coin | 83% (n=18) | 40% | 40% | 55% |
-| simonsays | 97% (n=32) | 85% | 5% | 55% |
-| peckingorder | untested | 100% | 100% | 45% |
-| cookingworld | 0% (n=10) | 0% | 0% | 0% |
-| mapreader | 31% (n=13) | 60% | 25% | 40% |
+| game | Opus 4.8 | GPT-5.4 | Qwen2.5-3B |
+|---|---|---|---|
+| coin | 40% | 40% | 55% |
+| simonsays | 85% | 5% | 55% |
+| peckingorder | 100% | 100% | 45% |
+| cookingworld | 0% | 0% | 0% |
+| mapreader | 60% | 25% | 40% |
 
 ## Insights
 
-- `cookingworld` is unsolved by every model tested, including Qwen2.5-3B (0% for Sonnet 5, Opus
-  4.8, GPT-5.4, and Qwen2.5-3B) but not broken — 1-5% nonzero-reward turns across all four show
-  real mid-episode partial credit exists.
-- GPT-5.4 has a striking, specific weakness on `simonsays` (5% win) — a game Opus 4.8, Sonnet 5,
-  and Qwen2.5-3B all treat as at least moderately solvable (85%, 97%, 55%). At n=20 with a gap
-  this large, this reads as a genuine capability gap, not noise.
-- `peckingorder` is NOT universally trivial — it's trivial only at frontier-model scale. Opus 4.8
-  and GPT-5.4 both hit 100% (always exactly 8 steps), but Qwen2.5-3B drops to 45%, with much more
-  variable episode length (1-21 steps). Revises the earlier read of this game as
-  "deterministic/no failure signal" — that only holds for frontier-scale models.
-- Qwen2.5-3B, despite being far smaller and run locally, beats both frontier API models on `coin`
-  (55% vs 40%/40%) and beats GPT-5.4 badly on `simonsays` (55% vs 5%, though still behind Opus's
-  85%). Model size alone doesn't predict per-game performance in this game mix.
-- No model dominates across the board. Model choice for this project should stay game/task-aware
-  rather than picking a single "best" model.
+- `cookingworld` is unsolved by every model tested (0%) but not broken — 1-5% nonzero-reward
+  turns across all three show real mid-episode partial credit exists.
+- GPT-5.4 has a striking, specific weakness on `simonsays` (5% win) vs. Opus 4.8 and Qwen2.5-3B
+  (85%, 55%) — a genuine capability gap, not noise.
+- `peckingorder` is trivial only at frontier-model scale (Opus 4.8/GPT-5.4 both 100%);
+  Qwen2.5-3B drops to 45%.
+- No model dominates across the board. Model choice should stay game/task-aware.
+
+## Single-agent vs. agentic loop (build 01 vs. build 02, same models/games)
+
+| game | Opus 4.8 (single → loop) | GPT-5.4 (single → loop) | Qwen2.5-3B (single → loop) |
+|---|---|---|---|
+| coin | 85% → 40% | 50% → 40% | 60% → 55% |
+| simonsays | 100% → 85% | 100% → 5% | 100% → 55% |
+| peckingorder | 100% → 100% | 95% → 100% | 40% → 45% |
+| cookingworld | 0% → 0% | 0% → 0% | 0% → 0% |
+| mapreader | 50% → 60% | 35% → 25% | 30% → 40% |
+
+The thinker+worker agentic loop underperforms the single-agent baseline (`01_model_baselines.md`)
+on `simonsays` for every model, most dramatically GPT-5.4 (100% → 5%) — the upfront plan step
+actively hurts there. `mapreader` is the one game where the agentic loop tends to do better,
+plausibly because it rewards following a multi-step navigation instruction. Any future
+verifier/coordinator layer should be benchmarked against the single-agent baseline, not assumed
+to need the thinker+worker split as its foundation.

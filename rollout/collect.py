@@ -17,7 +17,7 @@ import time
 from dotenv import load_dotenv
 load_dotenv()
 
-from rollout.runner import run_episode, run_single_agent_episode, DEFAULT_MODEL
+from rollout.runner import run_episode, run_single_agent_episode, run_coordinated_episode, DEFAULT_MODEL
 
 # path to base alfworld config file
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "configs", "alfworld_base.yaml")
@@ -50,15 +50,23 @@ def collect(
     env_name: str = "alfworld",
     twx_games: tuple[str, ...] | None = None,
     single_agent: bool = False,
+    coordinated: bool = False,
 ) -> None:
     """collect n rollout trajectories and save as json files.
 
-    single_agent=True uses run_single_agent_episode (one model, no thinker plan) instead of the
-    default thinker+worker agentic loop (run_episode)."""
+    single_agent=True uses run_single_agent_episode (one model, no thinker plan). coordinated=True
+    uses run_coordinated_episode (thinker+worker plus a fixed repetition-triggered replan).
+    default (both False) is the zero-coordination thinker+worker loop (run_episode). single_agent
+    and coordinated are mutually exclusive."""
     # create output directory and initialize environment
     os.makedirs(out_dir, exist_ok=True)
     env = _make_env(env_name, split, twx_games)
-    episode_fn = run_single_agent_episode if single_agent else run_episode
+    if single_agent:
+        episode_fn = run_single_agent_episode
+    elif coordinated:
+        episode_fn = run_coordinated_episode
+    else:
+        episode_fn = run_episode
 
     won_count = 0
     failed = 0
@@ -115,6 +123,13 @@ if __name__ == "__main__":
         help="use the single-model baseline (one call per step, no thinker plan) instead of the "
              "default thinker+worker agentic loop.",
     )
+    parser.add_argument(
+        "--coordinated", action="store_true",
+        help="use the thinker+worker loop plus a fixed coordinator: replan when the worker "
+             "repeats the same action 3 times in a row. mutually exclusive with --single-agent.",
+    )
     args = parser.parse_args()
+    if args.single_agent and args.coordinated:
+        parser.error("--single-agent and --coordinated are mutually exclusive")
     twx_games = tuple(args.twx_games.split(",")) if args.twx_games else None
-    collect(args.n, args.out, args.split, args.model, args.env, twx_games, args.single_agent)
+    collect(args.n, args.out, args.split, args.model, args.env, twx_games, args.single_agent, args.coordinated)
