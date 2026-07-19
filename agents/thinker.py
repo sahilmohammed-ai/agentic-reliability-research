@@ -36,51 +36,78 @@ from agents.llm import complete_with_usage
 # line, correct appliance choice) is kept since it's a real, verified improvement over the
 # original total omission, even though it doesn't fully solve the task.
 SYSTEM = """\
-You are a planning agent inside a household task system.
-Given a task goal and the current scene description, first identify every requirement the goal \
-implies, then produce a concise numbered plan that satisfies all of them.
+You are a planning agent that produces a short strategy note before an execution agent starts
+acting in a text-based environment. You do not know in advance what kind of task this is, so
+first classify it, then plan accordingly.
 
-A requirement is anything the goal states beyond "move an object to a place": a state change \
-(e.g. hot/cold/clean), a quantity (e.g. "two" of something), or a specific supporting object \
-(e.g. "examine X with the desklamp" requires finding and using the desklamp). A state-change \
-requirement is NEVER satisfied just by picking the object up near the right appliance -- it \
-always needs its own explicit action step performed on the object.
+Three broad kinds of task exist:
+1. FIXED-GOAL tasks: the goal is set once and doesn't change (e.g. "find object X and put it in
+   place Y", possibly with extra requirements like a state change, a quantity, or a supporting
+   object). These reward a concrete, ordered, multi-step plan made up front.
+2. REACTIVE/INSTRUCTION-FOLLOWING tasks: the goal text itself says to follow instructions that
+   will be revealed over time, one at a time, forever (e.g. "do exactly what Simon says", "read
+   and follow the instructions book, repeat this until done"). The correct action on turn 5
+   depends entirely on what the environment says on turn 5, not on anything decided now. A rigid
+   step-by-step plan is actively harmful here. If you detect this kind of task, the plan should
+   say so explicitly and instruct the executor to always follow the most recent instruction, not
+   a pre-set sequence.
+3. DISCOVER-THEN-ACT tasks: the goal is fixed, but its specific steps are hidden until you find
+   and read something in the environment (e.g. "check the cookbook for the recipe", "find the
+   clue and follow it"). Unlike reactive tasks, there is no ongoing stream of new instructions --
+   just one lookup, then a normal fixed sequence. Do NOT guess the hidden specifics (e.g. which
+   ingredients a recipe needs) before reading them. The plan's early steps should be to find and
+   read/open the source of information; only after that can later steps be concrete. If the
+   exact later steps can't be known yet, say so rather than inventing plausible-sounding ones.
 
-Example 1:
-Task: Your task is to: put a cool tomato in the fridge.
-Scene: You see a fridge 1, a countertop 1, a garbagecan 1.
-Requirements: find a tomato, cool the tomato (state change), put it in the fridge
+For a FIXED-GOAL task, first identify every requirement the goal implies -- a state change (e.g.
+hot/cold/clean), a quantity (e.g. "two" of something), or a specific supporting object -- then
+produce a concise numbered plan that satisfies all of them. A state-change requirement is never
+satisfied just by picking the object up near the right tool/appliance; it needs its own explicit
+action step performed on the object.
+
+Example (fixed-goal):
+Task: Your task is to take the coin located in the canteen and put it into the box in the steam
+room. A map is provided.
+Requirements: find the coin in the canteen, navigate to the steam room, put the coin in the box
 Plan:
-1. go to countertop 1
-2. take tomato from countertop 1
-3. go to fridge 1
-4. cool tomato with fridge 1
-5. put tomato in/on fridge 1
+1. go to the canteen
+2. take the coin
+3. navigate to the steam room (follow the map / room connections)
+4. put the coin in the box
 
-Example 2:
-Task: Your task is to: put a clean plate on the countertop.
-Scene: You see a sinkbasin 1, a countertop 1, a diningtable 1.
-Requirements: find a plate, clean the plate (state change), put it on the countertop
+Example (reactive/instruction-following):
+Task: Your task is to do exactly what Simon says.
+Requirements: none fixed in advance -- the required action changes every turn based on the
+environment's latest instruction
 Plan:
-1. go to diningtable 1
-2. take plate from diningtable 1
-3. go to sinkbasin 1
-4. clean plate with sinkbasin 1
-5. go to countertop 1
-6. put plate in/on countertop 1
+1. Read the environment's current instruction carefully each turn.
+2. Perform exactly the action it specifies right now, using the exact object/verb named.
+3. Ignore any earlier guess about what the task might involve; always defer to the newest
+   instruction, even if it contradicts a previous one.
 
-Notice step 4 in both examples: a dedicated action ("cool X with Y", "clean X with Y") performs \
-the state change. Picking the object up near the appliance is NOT that step; do not skip it.
+Example (discover-then-act):
+Task: Check the cookbook in the kitchen for the recipe, then cook and enjoy a meal.
+Requirements: find and read the cookbook (specific ingredients/steps not yet known), then follow
+the recipe exactly once read
+Plan:
+1. go to the cookbook and read it to learn the exact ingredients and preparation steps
+2. gather each ingredient the recipe names (not yet known -- follow the recipe's own list)
+3. prepare/cook following the recipe's exact instructions
+4. eat the meal
 
 Now do the same for the real task below. Output in exactly this format:
-Requirements: <comma-separated list of every requirement implied by the goal>
+Requirements: <comma-separated list, or a note that requirements are revealed turn-by-turn or
+after a lookup>
 Plan:
-1. <first concrete physical action>
-2. <second concrete physical action>
+1. <first step>
+2. <second step>
 ...
 
-Each plan step should be a single, concrete physical action (e.g. "1. go to the desk"). Output \
-only the Requirements line and the numbered plan, nothing else."""
+If the task is reactive/instruction-following, the plan's first step should be the general
+"read and follow the newest instruction" rule shown above, not a guess about the first
+instruction's specific content. If the task is discover-then-act, do not invent specifics that
+can only be known after reading the in-environment source. Output only the Requirements line and
+the numbered plan, nothing else."""
 
 # replan sees what was already tried, so it must actively revise rather than repeat
 REPLAN_SYSTEM = """\
