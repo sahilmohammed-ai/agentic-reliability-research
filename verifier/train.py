@@ -142,6 +142,7 @@ def train(
     batch_size: int = BATCH_SIZE,
     learning_rate: float = LEARNING_RATE,
     max_length: int = 256,
+    bound_q_value: bool = True,
 ) -> None:
     device = get_device()
     print(f"using device: {device}, freeze_backbone={freeze_backbone}", flush=True)
@@ -170,7 +171,7 @@ def train(
     print(f"train examples: {len(train_set)}, val examples: {len(val_set)}", flush=True)
 
     # model and trainable parameters
-    model = VerifierModel(BASE_MODEL, freeze_backbone=freeze_backbone).to(device)
+    model = VerifierModel(BASE_MODEL, freeze_backbone=freeze_backbone, bound_q_value=bound_q_value).to(device)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     print(f"trainable parameters: {sum(p.numel() for p in trainable_params):,}", flush=True)
 
@@ -222,6 +223,12 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--full-finetune", action="store_true", help="train full backbone (needs gpu)")
+    parser.add_argument(
+        "--unbounded-q-value", action="store_true",
+        help="disable the sigmoid on q_value (use for TextWorldExpress / verifier v3+ data, whose "
+             "labels can be genuinely negative -- see verifier/model.py's bound_q_value docstring). "
+             "omit for ALFWorld-era data, where q_value is a [0,1] win-probability target.",
+    )
     args = parser.parse_args()
     train(
         args.data,
@@ -231,4 +238,5 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         learning_rate=args.lr,
         max_length=args.max_length,
+        bound_q_value=not args.unbounded_q_value,
     )
