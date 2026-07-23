@@ -33,7 +33,20 @@ class Verifier:
         q_value, advantage = verifier.score(task_goal, plan, obs_before, action)
     """
 
-    def __init__(self, checkpoint_dir: str, max_length: int = 256, device: torch.device | None = None):
+    def __init__(
+        self,
+        checkpoint_dir: str,
+        max_length: int = 256,
+        device: torch.device | None = None,
+        bound_q_value: bool = True,
+    ):
+        """bound_q_value must match how this checkpoint was TRAINED (verifier/train.py's
+        --unbounded-q-value flag), not just a preference here. ALFWorld-era checkpoints
+        (v1/v2) were trained with the sigmoid on (bound_q_value=True, the default). TextWorldExpress
+        checkpoints (v3+) are trained with --unbounded-q-value, i.e. bound_q_value=False, since
+        their q_value labels can be genuinely negative (verifier/model.py's bound_q_value
+        docstring) -- loading one of those with the default True here would silently sigmoid-
+        squash every real-valued score into (0,1), corrupting the output without erroring."""
         self.device = device or get_device()
         self.max_length = max_length
 
@@ -50,7 +63,7 @@ class Verifier:
         # state_dict includes the fine-tuned backbone weights, not just the head. freeze_backbone
         # here only controls the forward pass's grad-tracking branch, irrelevant at inference
         # since everything runs under no_grad regardless.
-        self.model = VerifierModel(BASE_MODEL, freeze_backbone=True)
+        self.model = VerifierModel(BASE_MODEL, freeze_backbone=True, bound_q_value=bound_q_value)
         state_dict = torch.load(checkpoint_path, map_location="cpu")
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
