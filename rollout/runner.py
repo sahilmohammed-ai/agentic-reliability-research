@@ -13,10 +13,15 @@ in this file anymore.
 """
 
 import uuid
+from typing import Any
 
-from envs.alfworld_env import AlfWorldEnv
 from agents import single_agent, thinker, worker
 from rollout.schemas import Turn, Trajectory
+
+# env wrapper type: any object with the reset/step/admissible_commands/won/task_goal interface
+# (see envs/textworldexpress_env.py). was previously annotated as AlfWorldEnv, but that module was
+# deleted with the ALFWorld pivot and the runners are duck-typed over any env wrapper anyway.
+EnvWrapper = Any
 from verifier.frozen_llm import score_turn as verifier_score_turn
 
 # same model used for both thinker and worker in a given run, swapped per performance test
@@ -103,7 +108,7 @@ def _looping_actions(history: list[str]) -> set[str]:
 
 
 def run_episode(
-    env: AlfWorldEnv,
+    env: EnvWrapper,
     task_id: str | None = None,
     model: str = DEFAULT_MODEL,
 ) -> Trajectory:
@@ -183,7 +188,7 @@ def run_episode(
 
 
 def run_coordinated_episode(
-    env: AlfWorldEnv,
+    env: EnvWrapper,
     task_id: str | None = None,
     model: str = DEFAULT_MODEL,
 ) -> Trajectory:
@@ -260,7 +265,7 @@ def run_coordinated_episode(
 
 
 def run_masked_episode(
-    env: AlfWorldEnv,
+    env: EnvWrapper,
     task_id: str | None = None,
     model: str = DEFAULT_MODEL,
 ) -> Trajectory:
@@ -338,7 +343,7 @@ def run_masked_episode(
 
 
 def run_reward_aware_episode(
-    env: AlfWorldEnv,
+    env: EnvWrapper,
     task_id: str | None = None,
     model: str = DEFAULT_MODEL,
 ) -> Trajectory:
@@ -445,7 +450,7 @@ def run_reward_aware_episode(
 
 
 def run_backtrack_episode(
-    env: AlfWorldEnv,
+    env: EnvWrapper,
     task_id: str | None = None,
     model: str = DEFAULT_MODEL,
 ) -> Trajectory:
@@ -530,7 +535,7 @@ VERIFIER_INTERVENTIONS = ("mask", "replan", "backtrack")
 
 
 def run_verifier_coordinated_episode(
-    env: AlfWorldEnv,
+    env: EnvWrapper,
     task_id: str | None = None,
     model: str = DEFAULT_MODEL,
     intervention: str = "mask",
@@ -648,7 +653,7 @@ def run_verifier_coordinated_episode(
 
 
 def run_single_agent_episode(
-    env: AlfWorldEnv,
+    env: EnvWrapper,
     task_id: str | None = None,
     model: str = DEFAULT_MODEL,
 ) -> Trajectory:
