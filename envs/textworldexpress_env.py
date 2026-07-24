@@ -70,13 +70,23 @@ STEP_LIMIT = 50  # coin/simonsays/peckingorder are short-horizon, alfworld-compa
 # adaptation to the penalty signal. this is a genuine comprehension/adaptation gap, not a
 # step-limit problem, but it's a narrow, repetitive failure signature (one wrong guess repeated)
 # rather than diverse failure modes -- dropped from the training mix on that basis.
-TRAINING_GAMES = ("coin", "simonsays", "peckingorder", "cookingworld", "mapreader")
+# verifier-training mix (2026-07-24, difficulty-calibrated). cookingworld dropped: 0% win for a
+# 3b worker means all-failure, no success contrast, and it was ~28% of turns dragging the verifier
+# toward flat predictions. the remaining games are tuned (see _GAME_PARAMS) so a Qwen2.5-3B worker
+# wins ~30-60% -- balanced success/failure, which is what the turn-level verifier needs to learn
+# discrimination from and to be EVALUATED on (mapreader, already ~30-40% win, was the one game
+# where the trained verifier discriminated well, AUC ~0.78; the others were too easy to produce
+# failure examples). peckingorder kept at its default ~90% win despite having no difficulty knob:
+# some failure signal plus task variety is better than an empty slot.
+TRAINING_GAMES = ("coin", "simonsays", "peckingorder", "mapreader")
 DEFAULT_GAMES = ("coin", "simonsays", "peckingorder")
 HARDER_GAMES = ("cookingworld", "twc", "mapreader", "arithmetic")
-# modest game params keep the tasks in the tractable range for a small worker
+# difficulty params calibrated via scripts/difficulty_sweep.py to land in the ~30-60% win zone:
+# coin numLocations=8 (~40%), simonsays gameLength=15 (~60%). mapreader default already balanced;
+# peckingorder has no difficulty param.
 _GAME_PARAMS = {
-    "coin": "numLocations=5,numDistractorItems=3",
-    "simonsays": "gameLength=5",
+    "coin": "numLocations=8,numDistractorItems=5",
+    "simonsays": "gameLength=15",
     "peckingorder": "",
 }
 
