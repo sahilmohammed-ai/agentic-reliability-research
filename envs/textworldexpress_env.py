@@ -1,15 +1,54 @@
+import glob
 import os
+import shutil
 
 import textworld_express as twx
 
 
 # textworld-express, like scienceworld, runs a scala/jvm backend over py4j, so a jdk must be
-# reachable. openjdk@17 (homebrew) is keg-only, so point at it explicitly unless the caller
-# already set JAVA_HOME. mirrors the scienceworld wrapper's handling.
-_DEFAULT_JAVA_HOME = "/opt/homebrew/opt/openjdk@17"
-if "JAVA_HOME" not in os.environ and os.path.isdir(_DEFAULT_JAVA_HOME):
-    os.environ["JAVA_HOME"] = _DEFAULT_JAVA_HOME
-    os.environ["PATH"] = f"{_DEFAULT_JAVA_HOME}/bin:" + os.environ.get("PATH", "")
+# reachable (the `java` binary on PATH). this locates one across the environments this project
+# runs in -- mac (homebrew, keg-only so not auto-on-PATH) and linux GPU studios (conda or apt
+# openjdk) -- so a fresh studio only needs `conda install -y openjdk=17` (or apt), not a manual
+# JAVA_HOME export every time.
+def _ensure_java_on_path() -> None:
+    # if JAVA_HOME is already set to a real jdk, trust it and stop.
+    jh = os.environ.get("JAVA_HOME")
+    if jh and os.path.isfile(os.path.join(jh, "bin", "java")):
+        os.environ["PATH"] = f"{jh}/bin:" + os.environ.get("PATH", "")
+        return
+    # search known-good jdk homes FIRST, before any bare PATH `java`: macos ships a stub at
+    # /usr/bin/java that shutil.which() finds but that is NOT a usable runtime (it just prints
+    # "Unable to locate a Java Runtime"), so a which()-based early return silently picks the
+    # broken stub over the real homebrew/conda jdk. prefer explicit homes instead.
+    candidates = [
+        "/opt/homebrew/opt/openjdk@17",                    # mac homebrew
+        os.environ.get("CONDA_PREFIX", ""),                # conda openjdk puts java in $CONDA_PREFIX/bin
+        "/usr/lib/jvm/java-17-openjdk-amd64",              # debian/ubuntu apt openjdk-17
+    ]
+    candidates += sorted(glob.glob("/usr/lib/jvm/*"))      # any other apt-installed jvm
+    for home in candidates:
+        if home and os.path.isfile(os.path.join(home, "bin", "java")):
+            os.environ["JAVA_HOME"] = home
+            os.environ["PATH"] = f"{home}/bin:" + os.environ.get("PATH", "")
+            return
+    # nothing usable in the known homes: fall back to a real PATH java only if it actually runs
+    # (guards against the macos stub). if even that fails, error loudly with the fix.
+    java = shutil.which("java")
+    if java:
+        try:
+            import subprocess
+            subprocess.run([java, "-version"], capture_output=True, check=True)
+            return  # a working java is already on PATH
+        except (subprocess.CalledProcessError, OSError):
+            pass
+    raise RuntimeError(
+        "TextWorldExpress needs a JDK (the `java` binary) but none was found on PATH or in the "
+        "usual locations. On a Lightning AI studio run: conda install -y openjdk=17  (or: "
+        "sudo apt-get install -y openjdk-17-jdk). On mac: brew install openjdk@17."
+    )
+
+
+_ensure_java_on_path()
 
 STEP_LIMIT = 50  # coin/simonsays/peckingorder are short-horizon, alfworld-comparable
 
