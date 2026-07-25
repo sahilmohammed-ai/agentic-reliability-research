@@ -1,15 +1,16 @@
 """
-score every turn in build 03's held-out eval_ood baseline with the trained verifier v3 checkpoint
+score every turn in the balanced eval_ood set (build 12) with a trained verifier checkpoint
 (verifier/infer.py's Verifier class) and save scores for evaluation, mirroring build 08's frozen
 LLM verifier evaluation but with a trained checkpoint instead of a prompted judge.
 
-data/rollouts/twx/03_qwen_stratified/ was NEVER used to train verifier v3 (v3 trained on a
-separate --split train collection, data/labeled/twx/v3_train_combined/), so this is a genuine
-held-out evaluation, not a memorization check.
+data/rollouts/v5_eval_ood/ was collected fresh under the difficulty-calibrated _GAME_PARAMS
+(same as v5's training data) on the --split eval_ood fold, never trained on by any checkpoint --
+a genuine held-out evaluation, not a memorization check. cookingworld is excluded (dropped from
+the training mix in build 11).
 
 usage:
-    python -m scripts.score_trained_verifier --checkpoint checkpoints/verifier_v3 \\
-        --out data/labeled/twx/v3_eval_scores.json
+    python -m scripts.score_trained_verifier --checkpoint checkpoints/verifier_v5 \\
+        --out data/labeled/v5_eval_scores.json
 """
 
 import argparse
@@ -19,8 +20,8 @@ import time
 
 from verifier.infer import Verifier
 
-GAMES = ["coin", "simonsays", "peckingorder", "cookingworld", "mapreader"]
-SRC_DIR = "data/rollouts/03_qwen_stratified"
+GAMES = ["coin", "simonsays", "peckingorder", "mapreader"]
+SRC_DIR = "data/rollouts/v5_eval_ood"
 
 
 def score_episode(traj: dict, verifier: Verifier) -> list[dict]:
@@ -69,7 +70,7 @@ def main(checkpoint_dir: str, out_path: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/verifier_v3")
-    parser.add_argument("--out", type=str, default="data/labeled/twx/v3_eval_scores.json")
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/verifier_v5")
+    parser.add_argument("--out", type=str, default="data/labeled/v5_eval_scores.json")
     args = parser.parse_args()
     main(args.checkpoint, args.out)

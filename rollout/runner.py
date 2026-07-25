@@ -705,3 +705,144 @@ def run_single_agent_episode(
         won=env.won(info),
         total_steps=env_step,
     )
+
+
+LEARNED_COORDINATOR_ACTIONS = ("continue", "retry", "replan", "backtrack")
+
+
+def run_learned_coordinated_episode(
+    env: EnvWrapper,
+    coordinator,  # coordinator.infer.CoordinatorPolicy, duck-typed to avoid a hard import cycle
+    verifier,     # verifier.infer.Verifier, same reasoning
+    task_id: str | None = None,
+    model: str = DEFAULT_MODEL,
+    greedy: bool = False,
+) -> Trajectory:
+    """thinker+worker loop with a LEARNED coordinator policy choosing one of
+    LEARNED_COORDINATOR_ACTIONS before each worker turn, trained via PPO against verifier_v5's
+    q_value as reward (see coordinator/train_ppo.py). unlike run_verifier_coordinated_episode
+    (build 09's fixed streak-threshold trigger), the policy decides EVERY turn, not just when a
+    rule fires -- the 4-way choice itself is what's learned, not just when to intervene.
+
+    no "escalate" action: dropped per build 11's diagnosis (confounded win-rate signal, 71%
+    escalate rate in LOST episodes vs 30% in won -- see coordinator/model.py's docstring). the
+    worker model is the SAME frozen model on every turn, so the verifier's reward reflects pure
+    coordination skill, not "was a stronger model available this turn."
+
+    the coordinator conditions on the PRIOR turn's verifier q_value/advantage (there's nothing to
+    condition on before turn 1, so the first turn always defaults to "continue"). its chosen
+    action is applied BEFORE the worker acts on the CURRENT turn, then the verifier scores the
+    resulting turn -- that score is the reward for the coordinator's choice, stored in metadata so
+    the PPO trainer can read it back out (state text, action, log_prob, reward) without
+    re-deriving anything.
+
+    greedy=False (default) samples stochastically and stores log_prob, required during PPO
+    rollout collection. greedy=True takes the argmax action instead, for eval/deployment (no
+    log_prob needed, matches CoordinatorPolicy.act_greedy)."""
+    task_id = task_id or str(uuid.uuid4())[:8]
+    turns: list[Turn] = []
+    action_history: list[str] = []
+    env_step = 0
+
+    max_steps = getattr(env, "step_limit", MAX_STEPS)
+
+    obs, info = env.reset()
+    task_goal = env.task_goal(obs, info)
+    env_hint = env.worker_hint() if hasattr(env, "worker_hint") else ""
+
+    ep_plan, initial_plan_usage = thinker.plan(task_goal, obs, model=model)
+
+    done = False
+    current_obs = obs
+    pending_plan_usage = initial_plan_usage
+    last_q_value, last_advantage = 0.0, 0.0  # no verifier score exists before turn 1
+
+    while not done and env_step < max_steps:
+        admissible = env.admissible_commands(info)
+
+        if env_step == 0:
+            coord_action, coord_log_prob = "continue", None
+        elif greedy:
+            coord_action = coordinator.act_greedy(
+                task_goal, ep_plan, current_obs, action_history, last_q_value, last_advantage,
+            )
+            coord_log_prob = None
+        else:
+            coord_action, coord_log_prob = coordinator.sample(
+                task_goal, ep_plan, current_obs, action_history, last_q_value, last_advantage,
+            )
+
+        masked_actions: set[str] = set()
+        replanned = False
+        retry_hint = ""
+
+        if coord_action == "retry" and action_history:
+            # re-invoke the worker with a "reconsider" nudge and its own last action masked out,
+            # so it's forced to pick something genuinely different rather than repeat verbatim --
+            # matches the original (deleted) coordinator.py's retry semantics, not a no-op.
+            masked_actions = {action_history[-1]}
+            retry_hint = (
+                "Your previous action did not clearly advance the task. Reconsider the current "
+                "observation and choose a different, more promising command."
+            )
+        elif coord_action == "replan":
+            ep_plan, replan_usage = thinker.replan(
+                task_goal, ep_plan, action_history, current_obs, model=model,
+            )
+            pending_plan_usage = replan_usage
+            replanned = True
+        elif coord_action == "backtrack" and action_history:
+            masked_actions = {action_history[-1]}
+
+        worker_choices = [c for c in admissible if c not in masked_actions] or admissible
+
+        combined_hint = f"{env_hint}\n\n{retry_hint}".strip() if retry_hint else env_hint
+
+        chosen, worker_usage = worker.act(
+            task_goal, ep_plan, current_obs, worker_choices, action_history,
+            model=model, env_hint=combined_hint,
+        )
+        next_obs, reward, done, info = env.step(chosen)
+        env_step += 1
+        action_history.append(chosen)
+
+        q_value, advantage = verifier.score(task_goal, ep_plan, current_obs, chosen)
+
+        turn_metadata = {
+            "admissible_commands": admissible,
+            "usage": worker_usage,
+            "coordinator_action": coord_action,
+            "coordinator_log_prob": coord_log_prob,
+            "coordinator_state_obs": current_obs,       # state the coordinator conditioned on
+            "coordinator_prior_q_value": last_q_value,   # reward context available to it
+            "coordinator_prior_advantage": last_advantage,
+            "masked_actions": sorted(masked_actions),
+            "replanned": replanned,
+            "q_value": q_value,          # verifier's score of the RESULTING turn == PPO reward
+            "advantage": advantage,
+        }
+        if pending_plan_usage is not None:
+            turn_metadata["plan_usage"] = pending_plan_usage
+            pending_plan_usage = None
+
+        turns.append(Turn(
+            step=env_step,
+            role="worker",
+            obs_before=current_obs,
+            action=chosen,
+            obs_after=next_obs,
+            env_reward=reward,
+            done=done,
+            metadata=turn_metadata,
+        ))
+        current_obs = next_obs
+        last_q_value, last_advantage = q_value, advantage
+
+    return Trajectory(
+        task_id=task_id,
+        task_goal=task_goal,
+        plan=ep_plan,
+        turns=turns,
+        won=env.won(info),
+        total_steps=env_step,
+    )
