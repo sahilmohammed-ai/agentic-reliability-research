@@ -707,7 +707,7 @@ def run_single_agent_episode(
     )
 
 
-LEARNED_COORDINATOR_ACTIONS = ("continue", "retry", "replan", "backtrack")
+LEARNED_COORDINATOR_ACTIONS = ("continue", "retry", "replan")
 
 
 def run_learned_coordinated_episode(
@@ -720,14 +720,19 @@ def run_learned_coordinated_episode(
 ) -> Trajectory:
     """thinker+worker loop with a LEARNED coordinator policy choosing one of
     LEARNED_COORDINATOR_ACTIONS before each worker turn, trained via PPO against verifier_v5's
-    q_value as reward (see coordinator/train_ppo.py). unlike run_verifier_coordinated_episode
+    advantage as reward (see coordinator/train_ppo.py). unlike run_verifier_coordinated_episode
     (build 09's fixed streak-threshold trigger), the policy decides EVERY turn, not just when a
-    rule fires -- the 4-way choice itself is what's learned, not just when to intervene.
+    rule fires -- the 3-way choice itself is what's learned, not just when to intervene.
 
     no "escalate" action: dropped per build 11's diagnosis (confounded win-rate signal, 71%
     escalate rate in LOST episodes vs 30% in won -- see coordinator/model.py's docstring). the
     worker model is the SAME frozen model on every turn, so the verifier's reward reflects pure
     coordination skill, not "was a stronger model available this turn."
+
+    no "backtrack" action: an independent code review found the first implementation had
+    backtrack behaviorally identical to retry (both just masked the last action) -- a real bug,
+    not a design choice. rather than invent new, untested backtrack semantics, it was dropped;
+    continue/retry/replan are three genuinely distinct interventions (see coordinator/model.py).
 
     the coordinator conditions on the PRIOR turn's verifier q_value/advantage (there's nothing to
     condition on before turn 1, so the first turn always defaults to "continue"). its chosen
@@ -791,8 +796,6 @@ def run_learned_coordinated_episode(
             )
             pending_plan_usage = replan_usage
             replanned = True
-        elif coord_action == "backtrack" and action_history:
-            masked_actions = {action_history[-1]}
 
         worker_choices = [c for c in admissible if c not in masked_actions] or admissible
 

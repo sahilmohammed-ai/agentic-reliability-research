@@ -76,6 +76,9 @@ class CoordinatorPolicy:
         else:
             self.tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
             self.model = CoordinatorModel(BASE_MODEL, freeze_backbone=True)
+        # forced explicitly -- see coordinator/train_ppo.py's identical comment. the model reads
+        # the LAST non-pad token, which is only correct under right-padding.
+        self.tokenizer.padding_side = "right"
 
         self.model.to(self.device)
         self.model.eval()

@@ -97,6 +97,19 @@ def ppo_update(
     total_loss = 0.0
     num_updates = 0
 
+    # normalize advantages ONCE, over the whole iteration's batch, not per-minibatch. builds
+    # 10-12 confirmed the verifier's advantage scale differs a lot across games (coin/mapreader vs
+    # simonsays/peckingorder); per-minibatch normalization with random.shuffle would make a
+    # decision's normalized advantage depend on which OTHER games happened to land in the same
+    # size-BATCH_SIZE minibatch, pure noise from the shuffle rather than a stable target.
+    raw_advantages = torch.tensor([ex["reward"] for ex in examples], dtype=torch.float32)
+    if raw_advantages.std() > 1e-6:
+        norm_advantages = (raw_advantages - raw_advantages.mean()) / (raw_advantages.std() + 1e-8)
+    else:
+        norm_advantages = raw_advantages
+    for ex, adv in zip(examples, norm_advantages.tolist()):
+        ex["_norm_advantage"] = adv
+
     for epoch in range(PPO_EPOCHS):
         random.shuffle(examples)
         for start in range(0, len(examples), BATCH_SIZE):
@@ -107,11 +120,7 @@ def ppo_update(
             texts = [ex["text"] for ex in batch]
             action_idx = torch.tensor([action_to_idx[ex["action"]] for ex in batch], device=device)
             old_log_probs = torch.tensor([ex["old_log_prob"] for ex in batch], device=device)
-            advantages = torch.tensor([ex["reward"] for ex in batch], device=device, dtype=torch.float32)
-            # normalize advantages within the batch: stabilizes the update when the verifier's
-            # advantage scale varies a lot across games (confirmed real range in builds 10-12)
-            if advantages.std() > 1e-6:
-                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            advantages = torch.tensor([ex["_norm_advantage"] for ex in batch], device=device, dtype=torch.float32)
 
             encoded = tokenizer(
                 texts, truncation=True, max_length=MAX_LENGTH, padding=True, return_tensors="pt",
@@ -133,6 +142,10 @@ def ppo_update(
 
             optimizer.zero_grad()
             loss.backward()
+            # gradient clipping: cheap insurance against a full-finetune (1.5B params) diverging
+            # on a small (~20-episode), potentially high-variance batch -- no safeguard against
+            # this existed before, a real risk on a paid Lightning AI run.
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             total_loss += loss.item()
@@ -156,6 +169,12 @@ def train(
     print(f"using device: {device}", flush=True)
 
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    # forced explicitly, not left to the tokenizer's default: the model reads the LAST non-pad
+    # token via attention_mask.sum(dim=1)-1 (coordinator/model.py forward()), which is only
+    # correct under right-padding. Qwen2.5-1.5B-Instruct's default happens to already be "right"
+    # but relying on that silently is fragile -- a future checkpoint/tokenizer-config change would
+    # break every batched log_prob without erroring.
+    tokenizer.padding_side = "right"
     model = CoordinatorModel(BASE_MODEL, freeze_backbone=False).to(device)
     if resume_from:
         model.load_state_dict(torch.load(os.path.join(resume_from, "coordinator.pt"), map_location="cpu"))
