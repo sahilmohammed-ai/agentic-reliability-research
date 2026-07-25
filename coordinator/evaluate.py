@@ -29,11 +29,19 @@ from verifier.infer import Verifier
 
 def run_condition(
     label: str, games: tuple[str, ...], n_per_game: int, worker_model: str, split: str,
-    episode_fn,
+    episode_fn, track_actions: bool = False,
 ) -> dict:
     """run n_per_game episodes per game with episode_fn(env, task_id=..., model=...) -> Trajectory.
-    returns {game: {"won": int, "total": int, "win_rate": float, "avg_steps": float}}."""
+    returns {game: {"won": int, "total": int, "win_rate": float, "avg_steps": float}}.
+
+    track_actions=True (only meaningful for the learned coordinator condition) additionally tallies
+    coord_action counts, split by whether the EPISODE it occurred in ultimately won or lost --
+    diagnoses whether a win-rate drop comes from the policy learning a real but harmful bias (e.g.
+    over-intervening via retry/replan on turns that didn't need it) vs. having learned nothing
+    (near-uniform distribution). action_history[0] is always "continue" (turn 1 default, no
+    sampled decision -- see run_learned_coordinated_episode), excluded from these counts."""
     results = defaultdict(lambda: {"won": 0, "total": 0, "steps": []})
+    action_counts = {"won": defaultdict(int), "lost": defaultdict(int)}
     for game in games:
         env = TextWorldExpressEnvWrapper(split=split, games=(game,))
         for i in range(n_per_game):
@@ -41,6 +49,10 @@ def run_condition(
             results[game]["won"] += int(traj.won)
             results[game]["total"] += 1
             results[game]["steps"].append(traj.total_steps)
+            if track_actions:
+                bucket = action_counts["won"] if traj.won else action_counts["lost"]
+                for turn in traj.turns[1:]:  # skip turn 1's forced "continue" default
+                    bucket[turn.metadata["coordinator_action"]] += 1
             print(f"  [{label}] {game} {i+1}/{n_per_game}: won={traj.won} steps={traj.total_steps}", flush=True)
         env.close()
 
@@ -52,6 +64,18 @@ def run_condition(
             "win_rate": r["won"] / r["total"],
             "avg_steps": sum(r["steps"]) / len(r["steps"]),
         }
+
+    if track_actions:
+        for outcome in ("won", "lost"):
+            counts = action_counts[outcome]
+            total = sum(counts.values())
+            if total:
+                dist = {a: f"{counts[a]}/{total} ({counts[a]/total*100:.1f}%)" for a in counts}
+                print(f"  [{label}] action distribution in {outcome} episodes: {dist}", flush=True)
+        summary["_action_counts"] = {
+            "won": dict(action_counts["won"]), "lost": dict(action_counts["lost"]),
+        }
+
     return summary
 
 
@@ -70,6 +94,7 @@ def main(
     print(f"\n=== condition: learned coordinator ({coordinator_checkpoint}) ===", flush=True)
     learned_results = run_condition(
         "learned", TRAINING_GAMES, n_per_game, worker_model, split, learned_episode_fn,
+        track_actions=True,
     )
 
     print(f"\n=== condition: zero-coordination baseline ===", flush=True)
