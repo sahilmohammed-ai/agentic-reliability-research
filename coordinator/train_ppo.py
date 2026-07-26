@@ -49,17 +49,21 @@ MAX_LENGTH = 384
 # confirmed via coordinator/evaluate.py's action-distribution logging), driving a real win-rate
 # DROP vs the zero-coordination baseline (worst on the easy games peckingorder -33pts, simonsays
 # -23pts -- exactly where "retry" masks a correct last action and forces a disruptive re-attempt
-# on turns that didn't need one). 0.01 was not enough entropy pressure to prevent this. 0.08 is a
-# deliberately large first correction, not a finely-tuned value -- the goal is to confirm the
-# collapse mechanism is fixable at all before optimizing the exact coefficient.
+# on turns that didn't need one).
+#
+# coordinator_v2 postmortem (2026-07-26, same day): raising entropy to 0.08 and adding a
+# KL-to-reference penalty (removed below, see that note) did NOT fix this -- retry-share went
+# 99% (iteration 1) -> oscillated flat at 80-85% for the rest of training, no trend. Root cause,
+# confirmed via an independent review reading train()'s actual call order: iteration 1's rollouts
+# are collected from the UNTRAINED policy head (collect_batch runs before ppo_update each
+# iteration -- see train()), so 99% retry was never a training pathology, it was
+# coordinator/model.py's policy_head having a non-uniform initial bias BEFORE any gradient step
+# (nn.Linear's default init on top of a pretrained backbone's non-random hidden state does not
+# produce a uniform 3-way split -- fixed in coordinator/model.py via zero-init). Once that's
+# fixed, ENTROPY_COEF=0.08 is kept as the regularizer that keeps genuine reward-driven learning
+# from re-collapsing prematurely -- it was never the wrong knob, just insufficient to overcome a
+# biased init it never caused and couldn't see.
 ENTROPY_COEF = 0.08
-# KL_COEF: penalize divergence from a FROZEN reference copy of the policy's initial weights (the
-# other standard PPO anti-collapse mechanism, alongside entropy -- also flagged as a "concept to
-# own" in .info/CLAUDE.md that the original build never actually implemented). entropy alone only
-# discourages a peaked distribution in the abstract; KL-to-reference additionally discourages
-# drifting far from a KNOWN-reasonable starting policy in any one direction, which directly
-# targets "collapsed onto one action" as a large, specific divergence from a near-uniform init.
-KL_COEF = 0.05
 
 
 def collect_batch(
@@ -106,27 +110,26 @@ def collect_batch(
 
 
 def ppo_update(
-    model: CoordinatorModel, ref_model: CoordinatorModel, tokenizer, examples: list[dict],
-    optimizer, device: torch.device,
-) -> tuple[float, float, float]:
+    model: CoordinatorModel, tokenizer, examples: list[dict], optimizer, device: torch.device,
+) -> tuple[float, float]:
     """clipped-ratio PPO policy update over one collected batch. no value-function loss term --
     the advantage is precomputed from the frozen verifier (see module docstring), so this is a
     pure policy-gradient update, not the usual actor+critic joint loss.
 
-    ref_model is a FROZEN snapshot of the policy's weights at the start of training (see train()),
-    used only to compute a KL-to-reference penalty alongside the entropy bonus -- two DIFFERENT
-    anti-collapse mechanisms, not redundant: entropy pushes against a peaked distribution in the
-    abstract; KL-to-reference additionally penalizes drifting far from a known-reasonable starting
-    point in any specific direction, which directly targets "collapsed onto one action" (a large,
-    lopsided divergence from the near-uniform reference) in a way entropy alone did not prevent in
-    the first real run (coordinator_v1 converged to ~85-90% "retry" -- see ENTROPY_COEF's comment).
+    NO KL-to-reference penalty (removed 2026-07-26, coordinator_v2 postmortem): it anchored the
+    policy toward a FROZEN snapshot of its own initial weights -- which coordinator_v2 confirmed
+    were already biased toward "retry" before any training (nn.Linear's default init on a
+    pretrained backbone does not produce a uniform 3-way split, see coordinator/model.py's
+    zero-init fix). Penalizing divergence from an already-biased reference actively fights escaping
+    that bias. With the policy head now zero-initialized (truly uniform at iteration 1), entropy
+    alone is the right regularizer -- it has no direction of its own, so it can't anchor the policy
+    toward a bad prior the way KL-to-reference did.
 
-    returns (avg_loss, avg_entropy, avg_kl) so the caller can log all three per iteration and
-    catch a re-collapse early instead of only finding out at the next full evaluation."""
+    returns (avg_loss, avg_entropy) so the caller can log both per iteration and catch a
+    re-collapse early instead of only finding out at the next full evaluation."""
     action_to_idx = {a: i for i, a in enumerate(ACTIONS)}
     total_loss = 0.0
     total_entropy = 0.0
-    total_kl = 0.0
     num_updates = 0
 
     # normalize advantages ONCE, over the whole iteration's batch, not per-minibatch. builds
@@ -141,22 +144,6 @@ def ppo_update(
         norm_advantages = raw_advantages
     for ex, adv in zip(examples, norm_advantages.tolist()):
         ex["_norm_advantage"] = adv
-
-    # precompute ref_model's distribution ONCE per example, not once per minibatch x PPO_EPOCHS
-    # (an independent code review flagged the original version as 4x-redundant compute -- ref_model
-    # never changes within a call to ppo_update, so its output for a given text is a pure function
-    # of that text and doesn't need recomputing every time the same example reappears in a later
-    # epoch's reshuffled minibatch).
-    with torch.no_grad():
-        for start in range(0, len(examples), BATCH_SIZE):
-            batch = examples[start:start + BATCH_SIZE]
-            texts = [ex["text"] for ex in batch]
-            encoded = tokenizer(
-                texts, truncation=True, max_length=MAX_LENGTH, padding=True, return_tensors="pt",
-            ).to(device)
-            ref_logits = ref_model(encoded["input_ids"], encoded["attention_mask"])
-            for ex, logit_row in zip(batch, ref_logits):
-                ex["_ref_logits"] = logit_row.cpu()
 
     for epoch in range(PPO_EPOCHS):
         random.shuffle(examples)
@@ -178,21 +165,14 @@ def ppo_update(
             dist = torch.distributions.Categorical(logits=logits)
             new_log_probs = dist.log_prob(action_idx)
 
-            ref_logits = torch.stack([ex["_ref_logits"] for ex in batch]).to(device)
-            ref_dist = torch.distributions.Categorical(logits=ref_logits)
-
             ratio = torch.exp(new_log_probs - old_log_probs)
             unclipped = ratio * advantages
             clipped = torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS) * advantages
             policy_loss = -torch.min(unclipped, clipped).mean()
 
-            # entropy bonus (discourages a peaked distribution in the abstract) and KL-to-reference
-            # penalty (discourages drifting far from the frozen initial policy in any ONE
-            # direction) are two DIFFERENT anti-collapse mechanisms -- see ppo_update's docstring
-            # for why entropy alone (ENTROPY_COEF=0.01) was not enough in the first real run.
+            # entropy bonus keeps the policy from collapsing to a single action too early
             entropy_bonus = dist.entropy().mean()
-            kl_penalty = torch.distributions.kl_divergence(dist, ref_dist).mean()
-            loss = policy_loss - ENTROPY_COEF * entropy_bonus + KL_COEF * kl_penalty
+            loss = policy_loss - ENTROPY_COEF * entropy_bonus
 
             optimizer.zero_grad()
             loss.backward()
@@ -204,11 +184,10 @@ def ppo_update(
 
             total_loss += loss.item()
             total_entropy += entropy_bonus.item()
-            total_kl += kl_penalty.item()
             num_updates += 1
 
     n = max(num_updates, 1)
-    return total_loss / n, total_entropy / n, total_kl / n
+    return total_loss / n, total_entropy / n
 
 
 def train(
@@ -237,19 +216,6 @@ def train(
         model.load_state_dict(torch.load(os.path.join(resume_from, "coordinator.pt"), map_location="cpu"))
         print(f"resumed policy weights from {resume_from}", flush=True)
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=learning_rate)
-
-    # frozen reference model: an exact snapshot of the policy's STARTING weights (post-resume if
-    # applicable), never updated again. used only for the KL-to-reference penalty in ppo_update --
-    # a second, independent anti-collapse mechanism alongside the entropy bonus (see ENTROPY_COEF's
-    # comment for why entropy alone was not enough in the first real run). freeze_backbone=True
-    # (unlike the trained `model`) since this copy never trains -- avoids enabling gradient
-    # checkpointing/no-cache on a model that gets no gradients, real memory savings holding a
-    # second full 1.5B-param model on one GPU (an independent code review flagged this).
-    ref_model = CoordinatorModel(BASE_MODEL, freeze_backbone=True).to(device)
-    ref_model.load_state_dict(model.state_dict())
-    ref_model.eval()
-    for p in ref_model.parameters():
-        p.requires_grad = False
 
     verifier = Verifier(verifier_checkpoint, bound_q_value=False)  # v5 was trained --unbounded-q-value
     os.makedirs(out_dir, exist_ok=True)
@@ -282,11 +248,11 @@ def train(
         print(f"  action distribution this iteration: {dist_str}", flush=True)
 
         model.train()
-        avg_loss, avg_entropy, avg_kl = ppo_update(model, ref_model, tokenizer, examples, optimizer, device)
+        avg_loss, avg_entropy = ppo_update(model, tokenizer, examples, optimizer, device)
         mean_reward = sum(ex["reward"] for ex in examples) / len(examples)
         print(
             f"iteration {it}: avg_loss={avg_loss:.4f} mean_reward={mean_reward:.4f} "
-            f"avg_entropy={avg_entropy:.4f} avg_kl={avg_kl:.4f}", flush=True,
+            f"avg_entropy={avg_entropy:.4f}", flush=True,
         )
 
         torch.save(model.state_dict(), os.path.join(out_dir, "coordinator_last.pt"))

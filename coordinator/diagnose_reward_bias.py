@@ -1,28 +1,32 @@
 """
-diagnose whether the coordinator's PPO reward (verifier_v5's advantage on the resulting turn) is
-STRUCTURALLY biased toward "retry"-style actions, independent of whether retrying was actually the
-right call -- the root-cause hypothesis an independent (Opus advisor) review raised after
-coordinator_v1's training collapsed to ~85-92% "retry" in BOTH won and lost episodes.
+two diagnostics, run together, both BEFORE spending Lightning AI time on a third coordinator
+training attempt:
 
-mechanism under test: run_learned_coordinated_episode's "retry" action masks the worker's actual
-last action out of its choice list and adds a "reconsider, pick something different, more
-promising" prompt (agents/worker.py's env_hint), then scores whatever action results with
-verifier_v5. task_goal/plan/obs_before are IDENTICAL between the "continue" and "retry" paths on
-the same turn -- only the action string differs. if the verifier systematically scores the
-retry-produced action higher than the actual recorded (continue-path) action, REGARDLESS of
-whether the episode ultimately won or lost, that confirms the reward rewards "retry's nudge
-produces a locally better-looking action" rather than "was intervening actually the right call" --
-a reward-hacking optimum entropy/KL tuning alone cannot fix.
+(1) reward-bias check: does verifier_v5's advantage STRUCTURALLY favor "retry"-produced actions,
+independent of whether retrying was the right call? Tested and RULED OUT (2026-07-26, 115 real
+comparisons): retry-produced actions scored LOWER on average than the real recorded action
+(-0.1306 vs -0.0222), won only 42.6% of head-to-head comparisons. Kept in this script as a
+regression check, not because it's still an open question.
 
-v2 (faithful): the first version of this script used a uniformly RANDOM alternative admissible
-command as a proxy for "retry" and found no bias (retry_win_rate ~47%, a coin flip) -- but that
-doesn't test the real mechanism, since actual "retry" re-invokes the WORKER LLM with a directed
-"reconsider" prompt, not a random swap. this version calls agents.worker.act() for real, exactly
-replicating rollout/runner.py's retry branch (mask the real last action out of admissible, append
-the same retry_hint string to env_hint), so the alternative action is what the real coordinator's
-"retry" would actually produce. needs live LLM calls -- use hf:Qwen/Qwen2.5-3B-Instruct per the
-project's local-cost-discipline rule, NOT a frontier model, and NOT Lightning AI (this is cheap
-enough to run locally: one extra worker call per sampled turn, no training).
+(2) reward-separability check (the load-bearing one after coordinator_v2's postmortem): is the
+verifier's advantage even DIFFERENT enough across continue/retry/replan, at the ~20-episode/
+iteration scale train_ppo.py actually uses, for PPO to have anything to learn from? coordinator_v2
+trained with a policy head that (before its zero-init fix) started heavily biased toward "retry"
+and NEVER moved off that bias across 10 iterations (retry-share oscillated flat at 80-85%, no
+trend) -- consistent with a reward signal too weak/noisy at this scale to overcome even a
+CORRECTED (now-uniform) initialization. If continue/retry/replan's mean rewards are statistically
+indistinguishable here, no amount of policy-side fixes (zero-init, entropy, anything) will make
+PPO learn real discrimination -- the fix would be more episodes/iteration or a different reward
+design, not another coordinator-code change.
+
+mechanism: for each sampled real turn, compute what EACH of the 3 actions would actually produce
+and score with verifier_v5. "continue" = the real recorded action (ground truth). "retry" =
+worker.act() re-invoked with the real action masked out + the exact RETRY_HINT rollout/runner.py's
+retry branch uses. "replan" = thinker.replan() called on the real prior plan/history, then
+worker.act() under the NEW plan. All three go through the real worker/thinker LLM calls, not
+synthetic substitutes -- needs hf:Qwen/Qwen2.5-3B-Instruct per the project's local-cost-discipline
+rule, NOT a frontier model, and NOT Lightning AI (cheap enough locally: 2 extra LLM calls per
+sampled turn, no training).
 
 usage:
     python -m coordinator.diagnose_reward_bias --checkpoint checkpoints/verifier_v5 \\
@@ -35,12 +39,13 @@ import glob
 import json
 import os
 import random
+import statistics
 from collections import defaultdict
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from agents import worker
+from agents import thinker, worker
 from verifier.infer import Verifier
 
 GAMES = ("coin", "simonsays", "peckingorder", "mapreader")
@@ -54,7 +59,7 @@ def diagnose(checkpoint: str, rollout_dir: str, n_per_game: int, worker_model: s
     verifier = Verifier(checkpoint, bound_q_value=False)
     rng = random.Random(seed)
 
-    # {outcome: [(continue_score, retry_score), ...]}
+    # {outcome: [{"continue": score, "retry": score, "replan": score}, ...]}
     results = defaultdict(list)
 
     for game in GAMES:
@@ -75,48 +80,83 @@ def diagnose(checkpoint: str, rollout_dir: str, n_per_game: int, worker_model: s
             if len(admissible) < 2:
                 continue  # retry needs at least one real alternative to mask toward
 
-            # faithfully replicate rollout/runner.py's retry branch: mask the real action out of
-            # admissible, append RETRY_HINT to env_hint, re-invoke the SAME worker model with the
-            # REAL action history up to this turn (not synthetic)
             action_history = [t["action"] for t in worker_turns[:turn_idx]]
+
+            # continue: the real recorded action, ground truth
+            continue_score = verifier.score(traj["task_goal"], traj["plan"], turn["obs_before"], real_action)[1]
+
+            # retry: faithfully replicate rollout/runner.py's retry branch (mask the real action,
+            # append RETRY_HINT, re-invoke the SAME worker model with the real history)
             worker_choices = [c for c in admissible if c != real_action]
             retry_action, _ = worker.act(
                 traj["task_goal"], traj["plan"], turn["obs_before"], worker_choices, action_history,
                 model=worker_model, env_hint=RETRY_HINT,
             )
-
-            continue_score = verifier.score(traj["task_goal"], traj["plan"], turn["obs_before"], real_action)[1]
             retry_score = verifier.score(traj["task_goal"], traj["plan"], turn["obs_before"], retry_action)[1]
-            results[outcome].append((continue_score, retry_score))
-            print(f"  [{game}/{outcome}] continue={real_action!r} ({continue_score:.4f}) vs "
-                  f"retry={retry_action!r} ({retry_score:.4f})", flush=True)
 
-    print(f"{'outcome':8} {'n':>5} {'continue_mean':>14} {'retry_mean':>12} {'retry_wins':>11} {'retry_win_rate':>15}")
+            # replan: faithfully replicate rollout/runner.py's replan branch (thinker.replan() on
+            # the real prior plan/history, then worker.act() under the NEW plan, full admissible
+            # list -- replan does not mask anything)
+            new_plan, _ = thinker.replan(
+                traj["task_goal"], traj["plan"], action_history, turn["obs_before"], model=worker_model,
+            )
+            replan_action, _ = worker.act(
+                traj["task_goal"], new_plan, turn["obs_before"], admissible, action_history,
+                model=worker_model,
+            )
+            replan_score = verifier.score(traj["task_goal"], new_plan, turn["obs_before"], replan_action)[1]
+
+            results[outcome].append({"continue": continue_score, "retry": retry_score, "replan": replan_score})
+            print(
+                f"  [{game}/{outcome}] continue={real_action!r} ({continue_score:.4f}) | "
+                f"retry={retry_action!r} ({retry_score:.4f}) | "
+                f"replan={replan_action!r} ({replan_score:.4f})", flush=True,
+            )
+
+    print(f"\n{'outcome':8} {'n':>5} {'continue_mean':>14} {'retry_mean':>12} {'replan_mean':>13} "
+          f"{'retry_wins%':>12} {'replan_wins%':>13}")
     for outcome in ("won", "lost"):
-        pairs = results[outcome]
-        if not pairs:
+        rows = results[outcome]
+        if not rows:
             continue
-        n = len(pairs)
-        continue_mean = sum(c for c, r in pairs) / n
-        retry_mean = sum(r for c, r in pairs) / n
-        retry_wins = sum(1 for c, r in pairs if r > c)
-        print(f"{outcome:8} {n:>5} {continue_mean:>14.4f} {retry_mean:>12.4f} {retry_wins:>11} {retry_wins/n*100:>14.1f}%")
+        n = len(rows)
+        continue_mean = sum(r["continue"] for r in rows) / n
+        retry_mean = sum(r["retry"] for r in rows) / n
+        replan_mean = sum(r["replan"] for r in rows) / n
+        retry_wins = sum(1 for r in rows if r["retry"] > r["continue"])
+        replan_wins = sum(1 for r in rows if r["replan"] > r["continue"])
+        print(f"{outcome:8} {n:>5} {continue_mean:>14.4f} {retry_mean:>12.4f} {replan_mean:>13.4f} "
+              f"{retry_wins/n*100:>11.1f}% {replan_wins/n*100:>12.1f}%")
 
-    all_pairs = results["won"] + results["lost"]
-    if all_pairs:
-        n = len(all_pairs)
-        continue_mean = sum(c for c, r in all_pairs) / n
-        retry_mean = sum(r for c, r in all_pairs) / n
-        retry_wins = sum(1 for c, r in all_pairs if r > c)
-        print(f"\nOVERALL: n={n}, continue_mean={continue_mean:.4f}, retry_mean={retry_mean:.4f}, "
-              f"retry scored higher {retry_wins}/{n} ({retry_wins/n*100:.1f}%) of the time")
-        print(
-            "\nif retry_win_rate is well above 50% in BOTH won and lost episodes (not just lost), "
-            "that confirms a structural bias: a masked/alternative action scores better than the "
-            "worker's actual choice regardless of whether the episode was succeeding, which is "
-            "exactly the reward-hacking pattern that would make 'retry' look attractive to PPO "
-            "independent of whether intervening was ever the right call."
-        )
+    all_rows = results["won"] + results["lost"]
+    if not all_rows:
+        print("\nno usable comparisons collected.")
+        return
+
+    n = len(all_rows)
+    continue_scores = [r["continue"] for r in all_rows]
+    retry_scores = [r["retry"] for r in all_rows]
+    replan_scores = [r["replan"] for r in all_rows]
+    continue_mean, retry_mean, replan_mean = (sum(s) / n for s in (continue_scores, retry_scores, replan_scores))
+    print(f"\nOVERALL (n={n}): continue_mean={continue_mean:.4f}, retry_mean={retry_mean:.4f}, "
+          f"replan_mean={replan_mean:.4f}")
+
+    # separability check (finding 2 from the coordinator_v2 postmortem review): pooled std across
+    # all three actions' scores, vs. the spread between their means. if the between-action mean
+    # spread is small relative to the pooled std, the reward is NOT separable at this n -- PPO has
+    # nothing reliable to learn from regardless of policy-side fixes (zero-init, entropy, etc).
+    pooled = continue_scores + retry_scores + replan_scores
+    pooled_std = statistics.pstdev(pooled) if len(pooled) > 1 else 0.0
+    mean_spread = max(continue_mean, retry_mean, replan_mean) - min(continue_mean, retry_mean, replan_mean)
+    print(f"pooled_std={pooled_std:.4f}, mean_spread_across_actions={mean_spread:.4f}, "
+          f"spread/std_ratio={mean_spread / pooled_std if pooled_std > 1e-9 else float('nan'):.3f}")
+    print(
+        "\nif spread/std_ratio is small (well under ~0.3-0.5), the three actions' rewards are NOT "
+        "meaningfully separable at this sample scale -- no coordinator-side fix (zero-init, "
+        "entropy coefficient, KL, anything) can make PPO learn real discrimination from noise "
+        "this close to indistinguishable. the fix would be more episodes/iteration (train_ppo.py "
+        "currently uses 20) or a different reward design, not another policy/hyperparameter change."
+    )
 
 
 if __name__ == "__main__":

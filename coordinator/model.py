@@ -60,6 +60,21 @@ class CoordinatorModel(nn.Module):
         # policy head outputs one logit per discrete action (softmax applied by the caller,
         # kept as raw logits here so both sampling and cross-entropy-style PPO losses can use them)
         self.policy_head = nn.Linear(hidden_size, len(ACTIONS), dtype=torch.float32)
+        # zero-init (2026-07-26, coordinator_v2 postmortem): nn.Linear's default init (Kaiming-
+        # uniform weights + uniform bias) does NOT produce a uniform action distribution here,
+        # because the pretrained backbone's last-token hidden state has a consistent, non-random
+        # direction -- dotting that fixed direction with random weight rows systematically favors
+        # whichever row happens to align with it, for nearly every input. Confirmed directly:
+        # coordinator_v2's iteration-1 rollouts (collected from this untrained head, before any
+        # gradient step) were 99% "retry", 1% "continue", 0% "replan" -- entropy 0.26 vs ln(3)=1.10
+        # for true uniform. Training then never escaped that bias (retry-share oscillated flat at
+        # ~80-85% for the rest of training, no trend), because the reward signal was too weak
+        # relative to the KL-to-reference term anchoring back to that same biased init. Zeroing
+        # both weight and bias makes every input's logits identically [0,0,0] at init -- true
+        # 33/33/33 sampling from step 1, so the reward (not initialization noise) is what
+        # determines any subsequent movement.
+        nn.init.zeros_(self.policy_head.weight)
+        nn.init.zeros_(self.policy_head.bias)
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """return (batch, len(ACTIONS)) raw logits over the discrete action set."""
