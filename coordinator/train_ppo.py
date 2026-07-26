@@ -15,9 +15,27 @@ over DPO/GRPO for this project (agent_prm's DPO precedent needs branching multi-
 we don't have; PPO consumes the verifier's scalar value directly with no restructuring).
 
 usage (real training run, needs live LLM calls -- Lightning AI, not local):
-    python -m coordinator.train_ppo --iterations 10 --episodes-per-iter 20 \\
-        --verifier-checkpoint checkpoints/verifier_v5 --out checkpoints/coordinator_v1 \\
+    python -m coordinator.train_ppo --iterations 10 --episodes-per-iter 40 \\
+        --verifier-checkpoint checkpoints/verifier_v5 --out checkpoints/coordinator_v3 \\
         --worker-model hf:Qwen/Qwen2.5-3B-Instruct
+
+episodes_per_iter default raised 20 -> 40 (coordinator_v3, 2026-07-26, third-review recommendation):
+`coordinator/diagnose_reward_bias.py` confirmed a real, statistically solid reward signal
+(continue vs retry/replan gap ~4.8 standard errors at n=115 pooled) that coordinator_v1/v2's
+20-episode-per-iteration batches were too small and noisy to reliably detect -- that batch-level
+signal-to-noise, not the policy init (already fixed) or the reward design (already ruled out
+as biased), is the best-supported explanation for why retry-share oscillated flat with no trend
+across both prior attempts instead of moving toward the population-level answer. 40 was sized to
+push per-iteration decision counts comfortably past the ~60-80 needed to detect that gap reliably.
+
+KILL CRITERION for this run, so a third failure is visible at ~30% of the cost, not after all 10
+iterations + a full evaluation: iteration 1's action distribution MUST be ~33/33/33 (confirms the
+zero-init actually took -- if it isn't, stop immediately, something regressed). By iteration 3,
+"continue" share must be RISING above ~40% (the reward only clearly favors continue in WON
+episodes -- see diagnose_reward_bias.py's outcome-split numbers -- so a working gradient should
+move there first and fastest; retry/replan differentiation is not expected this early). If
+continue-share is still flat near 33% by iteration 3, or has re-collapsed toward one action
+>60%, STOP -- do not wait for the full run to confirm a third failure.
 """
 
 import argparse
@@ -77,7 +95,13 @@ def collect_batch(
     for the resulting turn)."""
     examples = []
     for i in range(n_episodes):
-        game = random.choice(games)
+        # round-robin over games, not random.choice: an independent review (2026-07-26, before
+        # the coordinator_v3 run) flagged random.choice as a second, avoidable variance source on
+        # top of the small per-iteration batch size -- with only ~20-40 episodes/iteration, one
+        # game dominating a batch by luck (build 10-12 confirmed games have very different reward
+        # scales) adds noise on top of the genuine reward signal, right when SNR is already the
+        # limiting factor. round-robin guarantees even game coverage every iteration for free.
+        game = games[i % len(games)]
         env = TextWorldExpressEnvWrapper(split=split, games=(game,))
         traj = run_learned_coordinated_episode(
             env, coordinator=policy, verifier=verifier, task_id=f"ppo_{i}",
@@ -194,7 +218,7 @@ def train(
     verifier_checkpoint: str,
     out_dir: str,
     iterations: int = 10,
-    episodes_per_iter: int = 20,
+    episodes_per_iter: int = 40,
     worker_model: str = "hf:Qwen/Qwen2.5-3B-Instruct",
     learning_rate: float = LEARNING_RATE,
     resume_from: str | None = None,
@@ -290,7 +314,7 @@ if __name__ == "__main__":
     parser.add_argument("--verifier-checkpoint", type=str, default="checkpoints/verifier_v5")
     parser.add_argument("--out", type=str, required=True)
     parser.add_argument("--iterations", type=int, default=10)
-    parser.add_argument("--episodes-per-iter", type=int, default=20)
+    parser.add_argument("--episodes-per-iter", type=int, default=40)
     parser.add_argument("--worker-model", type=str, default="hf:Qwen/Qwen2.5-3B-Instruct")
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
     parser.add_argument("--resume-from", type=str, default=None)
