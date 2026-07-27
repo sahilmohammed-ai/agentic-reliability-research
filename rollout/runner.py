@@ -737,13 +737,33 @@ def run_learned_coordinated_episode(
     the coordinator conditions on the PRIOR turn's verifier q_value/advantage (there's nothing to
     condition on before turn 1, so the first turn always defaults to "continue"). its chosen
     action is applied BEFORE the worker acts on the CURRENT turn, then the verifier scores the
-    resulting turn -- that score is the reward for the coordinator's choice, stored in metadata so
-    the PPO trainer can read it back out (state text, action, log_prob, reward) without
-    re-deriving anything.
+    resulting turn.
+
+    COUNTERFACTUAL reward (2026-07-27, coordinator_v4 postmortem): the reward stored is NOT the
+    raw verifier score of the resulting turn. Four training runs (v1-v4) converged on a real,
+    diagnosed problem: task_goal/plan/obs_before are IDENTICAL for "continue" and "retry" on the
+    same turn, and a masked-and-reprompted worker often picks a nearly-equivalent action anyway --
+    so the coordinator's reward was largely INVARIANT to its own decision (an independent review
+    confirmed this precisely; see .info/CLAUDE.md's build 13 section). Fixed by rewarding the
+    coordinator on a counterfactual baseline instead of an absolute score: whenever it picks
+    anything other than "continue", the worker is ALSO asked (one extra, side-channel call --
+    unmasked, no retry hint, current plan, NOT stepped into the environment) what it would have
+    done under plain continue on this exact turn. The verifier scores both; the reward is
+    `verifier(chosen_action) - verifier(continue_counterfactual_action)`. This isolates the
+    coordinator's OWN leverage (did intervening beat doing nothing on this turn) instead of an
+    absolute score both paths tend to satisfy similarly. When the coordinator picks "continue"
+    itself, the counterfactual IS the chosen action, so reward is exactly 0 by construction -- no
+    extra call needed, and this is the correct, not a degenerate, case (continue is the "no
+    leverage exercised" baseline against which everything else is measured).
+
+    stored in metadata so the PPO trainer can read it back out (state text, action, log_prob,
+    reward) without re-deriving anything.
 
     greedy=False (default) samples stochastically and stores log_prob, required during PPO
     rollout collection. greedy=True takes the argmax action instead, for eval/deployment (no
-    log_prob needed, matches CoordinatorPolicy.act_greedy)."""
+    log_prob needed, matches CoordinatorPolicy.act_greedy). the counterfactual call only fires
+    when greedy=False (training) -- eval/deployment doesn't need a reward at all, so greedy runs
+    skip it entirely, keeping eval cost unchanged."""
     task_id = task_id or str(uuid.uuid4())[:8]
     turns: list[Turn] = []
     action_history: list[str] = []
@@ -811,6 +831,37 @@ def run_learned_coordinated_episode(
 
         q_value, advantage = verifier.score(task_goal, ep_plan, current_obs, chosen)
 
+        # counterfactual reward (see docstring): only computed for TRAINING rollouts (greedy=False
+        # -- eval/deployment never needs a reward, so skip the extra call there) and only when the
+        # coordinator picked something other than "continue" (if it picked continue, the chosen
+        # action already IS the continue-counterfactual, so the gap is exactly 0 by construction,
+        # no extra worker call needed).
+        coordinator_reward = 0.0
+        if not greedy and coord_action != "continue":
+            # side-channel call: unmasked, no retry hint, NEVER stepped into the environment (the
+            # real env.step() above already used the ACTUAL chosen action) -- purely to score what
+            # continue would have produced, so it can be subtracted out as a baseline.
+            #
+            # both the real and counterfactual actions are scored under ep_plan (the plan that was
+            # ACTUALLY in effect when the turn happened -- the new post-replan plan on a replan
+            # turn, unchanged on a retry turn), not plan_before_decision. an independent review
+            # (2026-07-27) caught a real confound in the first version of this fix: scoring the
+            # counterfactual under the OLD pre-replan plan while the real turn used the NEW plan
+            # meant replan's reward partly reflected "does the verifier like the new plan's TEXT"
+            # rather than purely "did the resulting action improve." using the same ep_plan on
+            # both sides isolates action quality, which is what this reward is meant to measure --
+            # the worker's counterfactual action is still asked what it "would have done", we just
+            # score that hypothetical under the plan that was actually in force, matching the real
+            # side exactly except for the one thing that's supposed to differ (the action itself).
+            counterfactual_action, _ = worker.act(
+                task_goal, ep_plan, current_obs, admissible, action_history[:-1],
+                model=model, env_hint=env_hint,
+            )
+            _, counterfactual_advantage = verifier.score(
+                task_goal, ep_plan, current_obs, counterfactual_action,
+            )
+            coordinator_reward = advantage - counterfactual_advantage
+
         turn_metadata = {
             "admissible_commands": admissible,
             "usage": worker_usage,
@@ -819,9 +870,12 @@ def run_learned_coordinated_episode(
             "coordinator_state_obs": current_obs,       # state the coordinator conditioned on
             "coordinator_prior_q_value": last_q_value,   # reward context available to it
             "coordinator_prior_advantage": last_advantage,
+            "coordinator_reward": coordinator_reward,    # counterfactual: advantage(chosen) -
+                                                          # advantage(continue) -- THE PPO reward
             "masked_actions": sorted(masked_actions),
             "replanned": replanned,
-            "q_value": q_value,          # verifier's score of the RESULTING turn == PPO reward
+            "q_value": q_value,          # verifier's score of the RESULTING turn (diagnostic only,
+                                          # no longer used directly as the PPO reward)
             "advantage": advantage,
         }
         if pending_plan_usage is not None:

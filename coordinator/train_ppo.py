@@ -1,10 +1,10 @@
 """
-PPO training loop for the coordinator policy (coordinator/model.py), reward supplied by the
-already-trained, already-validated verifier_v5 checkpoint acting as a FROZEN critic -- no new
-critic is trained here (see .info/CLAUDE.md's coordinator-design decision: verifier_v5's q_value
-IS the value estimate, and its own `advantage` field, q(t) - q(t-1), is already a baseline-
-subtracted one-step advantage, so it's used directly as the PPO advantage rather than computing a
-separate GAE over a second, untrained value function).
+PPO training loop for the coordinator policy (coordinator/model.py), reward supplied by
+verifier_v5 (a FROZEN critic -- no new critic trained here), via a COUNTERFACTUAL construction
+(see rollout/runner.py's run_learned_coordinated_episode docstring for the full mechanism):
+reward = verifier.advantage(chosen action) - verifier.advantage(what "continue" would have done
+on this exact turn). NOT the raw verifier advantage of the resulting turn (that was v1-v4's
+design, replaced 2026-07-27 -- see that note below).
 
 online PPO by construction: each iteration collects fresh episodes with the CURRENT policy
 (rollout.runner.run_learned_coordinated_episode, greedy=False so log_probs are captured), then
@@ -16,26 +16,30 @@ we don't have; PPO consumes the verifier's scalar value directly with no restruc
 
 usage (real training run, needs live LLM calls -- Lightning AI, not local):
     python -m coordinator.train_ppo --iterations 10 --episodes-per-iter 40 \\
-        --verifier-checkpoint checkpoints/verifier_v5 --out checkpoints/coordinator_v3 \\
+        --verifier-checkpoint checkpoints/verifier_v5 --out checkpoints/coordinator_v5 \\
         --worker-model hf:Qwen/Qwen2.5-3B-Instruct
 
-episodes_per_iter default raised 20 -> 40 (coordinator_v3, 2026-07-26, third-review recommendation):
-`coordinator/diagnose_reward_bias.py` confirmed a real, statistically solid reward signal
-(continue vs retry/replan gap ~4.8 standard errors at n=115 pooled) that coordinator_v1/v2's
-20-episode-per-iteration batches were too small and noisy to reliably detect -- that batch-level
-signal-to-noise, not the policy init (already fixed) or the reward design (already ruled out
-as biased), is the best-supported explanation for why retry-share oscillated flat with no trend
-across both prior attempts instead of moving toward the population-level answer. 40 was sized to
-push per-iteration decision counts comfortably past the ~60-80 needed to detect that gap reliably.
+episodes_per_iter default raised 20 -> 40 (coordinator_v3, 2026-07-26, third-review recommendation,
+still the right scale for the same batch-noise reasons): `coordinator/diagnose_reward_bias.py`
+confirmed a real, statistically solid reward signal (continue vs retry/replan gap ~4.8 standard
+errors at n=115 pooled) that coordinator_v1/v2's 20-episode-per-iteration batches were too small
+and noisy to reliably detect. round-robin game sampling (collect_batch) also from that review.
 
-KILL CRITERION for this run, so a third failure is visible at ~30% of the cost, not after all 10
-iterations + a full evaluation: iteration 1's action distribution MUST be ~33/33/33 (confirms the
-zero-init actually took -- if it isn't, stop immediately, something regressed). By iteration 3,
-"continue" share must be RISING above ~40% (the reward only clearly favors continue in WON
-episodes -- see diagnose_reward_bias.py's outcome-split numbers -- so a working gradient should
-move there first and fastest; retry/replan differentiation is not expected this early). If
-continue-share is still flat near 33% by iteration 3, or has re-collapsed toward one action
->60%, STOP -- do not wait for the full run to confirm a third failure.
+COUNTERFACTUAL REWARD (2026-07-27, coordinator_v3/v4 postmortem -- the load-bearing fix, not
+another hyperparameter tweak): four full training runs (v1-v4) all plateaued or regressed vs the
+zero-coordination baseline, at increasingly refined hyperparameters (entropy, KL, zero-init, batch
+size, sampling). An independent review, given the FULL v1-v4 history including the v3->v4
+comparison, found the real bottleneck was never the policy or the tuning: task_goal/plan/
+obs_before are IDENTICAL for "continue" and "retry" on the same turn in the OLD reward (raw
+verifier advantage of the resulting turn) -- a masked-and-reprompted worker often picks a
+near-equivalent action anyway, so the reward was largely INVARIANT to the coordinator's own
+decision. It could only ever teach "don't over-intervene when things are already fine" (the one
+signal that survived, since v1-v4 DID show real continue-share growth in won episodes), never a
+positive intervention policy, because the reward couldn't isolate what retry/replan actually
+changed relative to doing nothing. Fixed by rewarding the coordinator on the GAP between what it
+chose and what continue would have produced on the same turn, not an absolute score both paths
+tend to satisfy similarly. This is a scoped reward-construction fix, not a redesign -- verifier_v5
+itself is untouched, PPO mechanics are untouched, only what number gets read as "reward" changed.
 """
 
 import argparse
@@ -125,7 +129,15 @@ def collect_batch(
                 "text": text,
                 "action": meta["coordinator_action"],
                 "old_log_prob": meta["coordinator_log_prob"],
-                "reward": meta["advantage"],  # verifier's baseline-subtracted advantage == PPO advantage
+                # counterfactual reward (2026-07-27 fix): advantage(chosen action) -
+                # advantage(what continue would have done on this exact turn), computed in
+                # run_learned_coordinated_episode. replaces the raw verifier advantage used in
+                # v1-v4, which was largely invariant to the coordinator's own decision (confirmed
+                # via independent review -- continue and retry often produced near-identical
+                # verifier scores on the same turn, so the reward couldn't teach "did my choice
+                # matter"). "continue" turns get reward exactly 0 by construction (the chosen
+                # action IS its own counterfactual baseline).
+                "reward": meta["coordinator_reward"],
             })
             history_so_far.append(turn.action)
         print(f"  episode {i+1}/{n_episodes} [{game}] won={traj.won} steps={traj.total_steps}", flush=True)
@@ -270,6 +282,23 @@ def train(
             for a in ACTIONS
         )
         print(f"  action distribution this iteration: {dist_str}", flush=True)
+
+        # reward-informativeness check (2026-07-27, counterfactual-reward fix): an independent
+        # review flagged that the counterfactual construction is correctly IMPLEMENTED but could
+        # still be uninformative if verifier_v5 just doesn't resolve daylight between two
+        # plausible actions on the same turn (a single linear regression head has no contrastive
+        # pressure to separate near-equivalent actions -- build 11/12 already showed thin AUC on
+        # several games). "continue" turns are EXCLUDED here (their reward is always exactly 0 by
+        # construction, not informative about the verifier). if nonzero_frac stays near 0 and
+        # mean_abs_reward stays near 0 across iterations, the bottleneck has moved from the reward
+        # FORMULA (fixed) to the verifier's action-resolution (not fixable by more PPO training) --
+        # the new early-kill signal, alongside continue-share, for this run.
+        non_continue = [ex["reward"] for ex in examples if ex["action"] != "continue"]
+        if non_continue:
+            nonzero_frac = sum(1 for r in non_continue if abs(r) > 1e-6) / len(non_continue)
+            mean_abs_reward = sum(abs(r) for r in non_continue) / len(non_continue)
+            print(f"  reward informativeness (non-continue turns, n={len(non_continue)}): "
+                  f"nonzero_frac={nonzero_frac:.2f} mean_abs_reward={mean_abs_reward:.4f}", flush=True)
 
         model.train()
         avg_loss, avg_entropy = ppo_update(model, tokenizer, examples, optimizer, device)
