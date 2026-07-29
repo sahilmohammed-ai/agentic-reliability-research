@@ -122,6 +122,18 @@ class TextWorldExpressEnvWrapper:
         info["gameName"] = game
         return obs, info
 
+    def reset_to(self, game: str, seed: int) -> tuple[str, dict]:
+        """reset to an EXPLICIT game+seed, not a random draw -- used for branching-rollout
+        collection (scripts/collect_branches.py), where the same (game, seed) must be replayed
+        multiple times, deterministically, to reach an identical decision point before diverging.
+        TextWorldExpress's reset(seed=...) is confirmed deterministic per (game, seed, gameFold),
+        so replaying an identical action prefix after this reproduces the exact same states."""
+        self._env.load(gameName=game, gameParams=_GAME_PARAMS.get(game, ""))
+        obs, info = self._env.reset(seed=seed, gameFold=self._fold())
+        info = dict(info)
+        info["gameName"] = game
+        return obs, info
+
     def step(self, action: str) -> tuple[str, float, bool, dict]:
         """execute one action and return observation, reward, done flag, and info."""
         obs, reward, done, info = self._env.step(action)
