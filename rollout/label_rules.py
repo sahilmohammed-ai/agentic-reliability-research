@@ -234,15 +234,30 @@ def _score_turn(
     return 0.0
 
 
+_LOOKAHEAD_K = 3  # turns of undiscounted lookahead folded into q_value, see label_trajectory()
+
+
 def label_trajectory(traj: dict) -> dict:
     """add rule-based q_value/advantage to every worker turn, replacing env_reward-derived labels.
-    q_value is the RAW per-turn rule score directly (NOT a discounted MC return-to-go) -- an
-    independent review found that discounting a sparse rule-score spike backward through many
-    neutral turns (the same formula shape as label_twx.py) makes q_value dominated by proximity to
-    the nearest spike (position), diluting the real same-state action contrast the rule scores
-    provide, which is the entire point of this labeler. advantage is still a one-step delta
-    (q_value_t - q_value_{t-1}) for shape-compatibility with verifier/model.py's 2-output head, but
-    is now ALSO genuinely action-dependent at every turn, since q_value itself is."""
+
+    q_value is a SHORT, UNDISCOUNTED reward-to-go: rule_score_t + sum of the next _LOOKAHEAD_K
+    turns' rule scores, truncated at episode end. NOT the full discounted MC return-to-go the old
+    env_reward-based labels used -- an independent review found that discounting a sparse spike
+    backward through many neutral turns (label_twx.py's formula shape) makes q_value dominated by
+    proximity to the nearest spike (position), diluting the real same-state action contrast rule
+    scores provide, which is the whole point of this labeler. a raw, zero-lookahead single-turn
+    score (the first version of this fix) avoids that bug but was ALSO reviewed and found to give
+    the verifier no credit-assignment horizon at all -- a genuinely useful SETUP move (e.g.
+    navigating toward the coin, reading a map) scores an identical 0.0 to random wandering, since
+    neither one immediately trips a rule. a short K=3 undiscounted lookahead is the middle ground:
+    long enough to let a setup move's payoff (an upcoming +1.0 a few turns later) partially credit
+    back to it, short enough that it stays action-sensitive rather than position-dominated -- rule
+    scores vary by WHICH action is taken at every turn (unlike env_reward, which was ~0 regardless
+    of action), so summing a short, fixed window doesn't reintroduce the original bug the way
+    discounting an episode-length tail did. advantage is still a one-step delta
+    (q_value_t - q_value_{t-1}); for two candidate actions compared at the SAME state (the
+    coordinator's actual use case), the shared q_value_{t-1} term cancels out of the comparison
+    either way, so this doesn't undermine same-state discrimination."""
     worker_turns = [t for t in traj["turns"] if t["role"] == "worker"]
     task_goal = traj["task_goal"]
     game = traj.get("turns", [{}])[0].get("metadata", {}).get("gameName", "") or _infer_game(traj)
@@ -284,13 +299,20 @@ def label_trajectory(traj: dict) -> dict:
                 # the norm and a fresh "read instructions book" is needed for the next target.
                 pending_peckingorder_target = None
 
+    n = len(scores)
+    lookahead_values = [
+        sum(scores[t:min(t + 1 + _LOOKAHEAD_K, n)])  # this turn's own score + next K, truncated
+        for t in range(n)
+    ]
+
     prev_value = 0.0
-    for turn, score in zip(worker_turns, scores):
-        turn["q_value"] = round(score, 6)
-        turn["advantage"] = round(score - prev_value, 6)
-        turn["rule_score"] = round(score, 6)  # identical to q_value now; kept as an explicit,
-                                                # clearly-named field for diagnostics/inspection
-        prev_value = score
+    for turn, score, q in zip(worker_turns, scores, lookahead_values):
+        turn["q_value"] = round(q, 6)
+        turn["advantage"] = round(q - prev_value, 6)
+        turn["rule_score"] = round(score, 6)  # the raw, single-turn score (pre-lookahead) --
+                                                # kept separate from q_value now that they differ,
+                                                # for diagnostics/inspection
+        prev_value = q
 
     return traj
 
