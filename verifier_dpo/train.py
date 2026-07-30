@@ -24,7 +24,6 @@ problem (see verifier_dpo/model.py's module docstring and .info/CLAUDE.md for th
 """
 
 import argparse
-import json
 import os
 
 import torch
@@ -32,19 +31,56 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
-from verifier_dpo.dataset import EpisodePairDataset, collate_fn, load_episodes_by_game, make_pairs
+from verifier_dpo.dataset import (
+    EpisodePairDataset, collate_fn, load_episodes_by_game, make_pairs, split_by_game,
+)
 from verifier_dpo.model import BASE_MODEL, PreferenceScorer
 
 BATCH_SIZE = 2
-LEARNING_RATE = 1e-3   # frozen-backbone-only default, matches verifier/train.py's local-test rate
+# lowered from 1e-3 after review (2026-07-29): the first GPU run showed most individual step
+# losses saturated at exactly 0.0000 with occasional spikes to 100+ (a few high-confidence-gap
+# pairs dominating each batch's gradient) -- switching episode_score() from sum to mean pooling
+# (see model.py) fixed the length-dependence but not this instability by itself. a lower lr plus
+# grad clipping (below) reduces how much any single outlier pair's gradient can move the head.
+LEARNING_RATE = 2e-4
+MAX_GRAD_NORM = 1.0    # added for the same reason -- caps any one batch's gradient magnitude
 NUM_EPOCHS = 3
 LOG_EVERY = 20
+VAL_FRACTION = 0.2
 
 
 def preference_loss(won_scores: torch.Tensor, lost_scores: torch.Tensor) -> torch.Tensor:
-    """bradley-terry pairwise loss: -log(sigmoid(won - lost)). pushes won episode's summed score
-    above the paired lost episode's, no margin needed (sigmoid already saturates gently)."""
+    """bradley-terry pairwise loss: -log(sigmoid(won - lost)). pushes won episode's mean per-token
+    score above the paired lost episode's, no margin needed (sigmoid already saturates gently)."""
     return -torch.nn.functional.logsigmoid(won_scores - lost_scores).mean()
+
+
+def _make_loader(by_game: dict, pairs_per_game, tokenizer, shuffle: bool) -> DataLoader:
+    pairs = make_pairs(by_game, pairs_per_game=pairs_per_game)
+    dataset = EpisodePairDataset(pairs, tokenizer)
+    return DataLoader(
+        dataset, batch_size=BATCH_SIZE, shuffle=shuffle,
+        collate_fn=lambda b: collate_fn(b, tokenizer.pad_token_id),
+    ), len(pairs)
+
+
+@torch.no_grad()
+def _evaluate(model, loader, device) -> tuple[float, float]:
+    model.eval()
+    total_loss, correct, n = 0.0, 0, 0
+    for batch in loader:
+        won_scores = model.episode_score(
+            batch["won_input_ids"].to(device), batch["won_attention_mask"].to(device),
+        )
+        lost_scores = model.episode_score(
+            batch["lost_input_ids"].to(device), batch["lost_attention_mask"].to(device),
+        )
+        loss = preference_loss(won_scores, lost_scores)
+        total_loss += loss.item() * len(batch["games"])
+        correct += (won_scores > lost_scores).sum().item()
+        n += len(batch["games"])
+    model.train()
+    return total_loss / n, correct / n
 
 
 def train(
@@ -60,14 +96,17 @@ def train(
     by_game = load_episodes_by_game(labeled_dir)
     for game, buckets in by_game.items():
         print(f"  {game}: {len(buckets['won'])} won, {len(buckets['lost'])} lost")
-    pairs = make_pairs(by_game, pairs_per_game=pairs_per_game)
-    print(f"total pairs: {len(pairs)}")
 
-    dataset = EpisodePairDataset(pairs, tokenizer)
-    loader = DataLoader(
-        dataset, batch_size=BATCH_SIZE, shuffle=True,
-        collate_fn=lambda b: collate_fn(b, tokenizer.pad_token_id),
-    )
+    # episode-grouped train/val split (added after review, 2026-07-29): the first run had no
+    # held-out split at all, so pairwise_acc was pure in-sample fit -- with peckingorder's 63 lost
+    # episodes reused ~4x across 237 pairs, high train accuracy alone could reflect memorizing a
+    # handful of episodes, not real generalization. splitting by episode (not by pair) guarantees
+    # no episode's text appears in both a training pair and a validation pair.
+    train_by_game, val_by_game = split_by_game(by_game, val_fraction=VAL_FRACTION)
+
+    train_loader, n_train_pairs = _make_loader(train_by_game, pairs_per_game, tokenizer, shuffle=True)
+    val_loader, n_val_pairs = _make_loader(val_by_game, pairs_per_game, tokenizer, shuffle=False)
+    print(f"train pairs: {n_train_pairs}, val pairs: {n_val_pairs}")
 
     model = PreferenceScorer(freeze_backbone=freeze_backbone).to(device)
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -77,7 +116,7 @@ def train(
     step = 0
     for epoch in range(num_epochs):
         epoch_loss, epoch_correct, epoch_n = 0.0, 0, 0
-        for batch in loader:
+        for batch in train_loader:
             won_scores = model.episode_score(
                 batch["won_input_ids"].to(device), batch["won_attention_mask"].to(device),
             )
@@ -88,6 +127,7 @@ def train(
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(trainable, MAX_GRAD_NORM)
             optimizer.step()
 
             epoch_loss += loss.item() * len(batch["games"])
@@ -97,8 +137,12 @@ def train(
             if step % LOG_EVERY == 0:
                 print(f"  epoch {epoch} step {step}: loss={loss.item():.4f}")
 
-        acc = epoch_correct / epoch_n
-        print(f"epoch {epoch}: avg_loss={epoch_loss/epoch_n:.4f} pairwise_acc={acc:.4f}")
+        train_acc = epoch_correct / epoch_n
+        val_loss, val_acc = _evaluate(model, val_loader, device)
+        print(
+            f"epoch {epoch}: train_avg_loss={epoch_loss/epoch_n:.4f} train_pairwise_acc={train_acc:.4f} "
+            f"val_avg_loss={val_loss:.4f} val_pairwise_acc={val_acc:.4f}"
+        )
 
     ckpt_path = os.path.join(out_dir, "model.pt")
     torch.save(model.state_dict(), ckpt_path)

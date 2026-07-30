@@ -12,13 +12,15 @@ NOT sparse -- every collected episode has exactly one, always known.
 architecture: same qwen backbone as verifier/model.py, but the head outputs ONE scalar per TOKEN
 POSITION (not one pooled scalar for the whole sequence). training uses a trajectory-level
 preference loss (bradley-terry / DPO-style, see train.py): push the model to prefer a real winning
-episode's full text over a real losing episode's full text, for the same game. because
-log P(episode) = sum over tokens of log P(token | prefix) under a causal LM view of the score head
-as an unnormalized log-density, the SAME per-token scores that produce the trajectory-level
-preference can be read off individually afterward and pooled per-turn (mean over each turn's action
-tokens) -- a real per-turn score, but one that reflects "was this turn part of a winning-flavored
-trajectory," not "was this specific action better than the untaken alternative at this state." see
-this package's train.py module docstring for what this can and cannot be expected to show.
+episode's full text over a real losing episode's full text, for the same game. the trajectory-level
+score is the MEAN of per-token scores (not a sum -- see episode_score()'s docstring for why this
+was changed after the first GPU sanity run, and the tradeoff it accepts: this is no longer a
+strict log P(episode) = sum_t log P(token_t) decomposition, just a length-normalized average). the
+SAME per-token scores that produce the trajectory-level preference can still be read off
+individually afterward and pooled per-turn (mean over each turn's action tokens) -- a real per-turn
+score, but one that reflects "was this turn part of a winning-flavored trajectory," not "was this
+specific action better than the untaken alternative at this state." see this package's train.py
+module docstring for what this can and cannot be expected to show.
 """
 
 import torch
@@ -60,8 +62,26 @@ class PreferenceScorer(nn.Module):
         return scores
 
     def episode_score(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        """sum of per-token scores over real (non-pad) tokens -- the trajectory-level score used
-        directly in the preference loss. sum (not mean) matches the log P(episode) = sum_t
-        log P(token_t) identity the per-turn read-out in infer.py relies on."""
+        """mean of per-token scores over real (non-pad) tokens -- the trajectory-level score used
+        directly in the preference loss.
+
+        changed from sum to mean (2026-07-29) after the first real GPU sanity run: summing raw,
+        unbounded per-token scores over hundreds of tokens produced an unconstrained, length-
+        dependent magnitude (observed avg_loss=23-37, most individual steps saturated at exactly
+        0.0000 with occasional 100+ spikes -- a few outlier pairs with extreme score gaps
+        dominating every batch, not stable learning across the batch). mean keeps the score on a
+        roughly unit scale regardless of episode length, which is what actually made loss values
+        interpretable and gradients well-behaved for training.
+
+        tradeoff, stated plainly: this breaks the strict log P(episode) = sum_t log P(token_t)
+        identity the module docstring frames this architecture around (mean is a length-
+        normalized average log-density per token, not a valid total sequence log-probability).
+        this is an intentional, acknowledged departure from that identity in exchange for a
+        trainable objective -- the per-turn read-out in infer.py already pools each turn's own
+        span by MEAN (not sum), so it was already inconsistent with a strict sum-based total
+        anyway. what's preserved: per-token scores remain individually meaningful and can still
+        be pooled per-turn after training, which is the only property the sanity check actually
+        needs."""
         scores = self.forward(input_ids, attention_mask)
-        return (scores * attention_mask.float()).sum(dim=1)
+        mask = attention_mask.float()
+        return (scores * mask).sum(dim=1) / mask.sum(dim=1)

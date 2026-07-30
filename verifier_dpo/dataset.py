@@ -14,21 +14,34 @@ import torch
 from torch.utils.data import Dataset
 
 
-def build_episode_text(traj: dict) -> str:
-    """concatenate every worker turn into one block, in the same per-turn shape
-    verifier/dataset.py's build_input_text uses (so the model sees familiar-looking text), but as
-    ONE continuous sequence for the whole episode rather than separate per-turn examples. turns
-    are separated with a marker so per-turn token spans can be recovered later if needed."""
-    lines = [f"Task: {traj['task_goal']}\n\nPlan:\n{traj['plan']}\n"]
+def build_episode_text(traj: dict) -> tuple[str, list[tuple[int, int]]]:
+    """concatenate every worker turn into one block, as ONE continuous sequence for the whole
+    episode (not separate per-turn examples). returns (text, turn_char_spans), where
+    turn_char_spans[i] = (start_char, end_char) of turn i's OWN block (observation + action) within
+    the returned text -- used by infer.py to slice per-turn scores out of a single whole-episode
+    forward pass, rather than re-encoding each turn in isolation.
+
+    fixes a real train/inference mismatch caught in review (2026-07-29): infer.py previously
+    re-encoded each turn as an ISOLATED (task, plan, obs, action) string via a separate
+    build_prefix_text() function with different separators and the plan re-attached to every
+    turn -- text the model never saw during training, since training only ever sees the whole
+    episode in this function's format. slicing spans from one real encoding removes the
+    mismatch entirely instead of trying to hand-match two separately-tokenized text formats."""
+    header = f"Task: {traj['task_goal']}\n\nPlan:\n{traj['plan']}\n"
+    text = header
+    spans: list[tuple[int, int]] = []
     for turn in traj["turns"]:
         if turn["role"] != "worker":
             continue
-        lines.append(
+        block = (
             f"\n[Turn {turn['step']}]\n"
             f"Observation:\n{turn['obs_before']}\n"
             f"Action taken: {turn['action']}"
         )
-    return "".join(lines)
+        start = len(text)
+        text += block
+        spans.append((start, len(text)))
+    return text, spans
 
 
 def load_episodes_by_game(labeled_dir: str) -> dict[str, dict[str, list[dict]]]:
@@ -47,9 +60,12 @@ def load_episodes_by_game(labeled_dir: str) -> dict[str, dict[str, list[dict]]]:
         if not worker_turns:
             continue
 
+        text, turn_spans = build_episode_text(traj)
         entry = {
             "episode_id": fname,
-            "text": build_episode_text(traj),
+            "text": text,
+            "turn_spans": turn_spans,
+            "turns": worker_turns,
             "won": bool(traj["won"]),
             "n_turns": len(worker_turns),
         }
@@ -57,6 +73,33 @@ def load_episodes_by_game(labeled_dir: str) -> dict[str, dict[str, list[dict]]]:
         bucket["won" if entry["won"] else "lost"].append(entry)
 
     return by_game
+
+
+def split_by_game(
+    by_game: dict[str, dict[str, list[dict]]], val_fraction: float = 0.2, seed: int = 42,
+) -> tuple[dict[str, dict[str, list[dict]]], dict[str, dict[str, list[dict]]]]:
+    """episode-grouped train/val split, done PER GAME and PER OUTCOME so both splits keep a
+    representative won/lost mix of every game, then pairs are built separately within each split
+    (see make_pairs()) so no episode's text appears in both a training pair and a validation pair.
+
+    added after review (2026-07-29): the first real run had no held-out split at all --
+    pairwise_acc was computed on the exact same pairs used for training, which is pure in-sample
+    fit and cannot distinguish real generalization from memorizing a handful of episodes (real risk
+    here: peckingorder has only 63 lost episodes total, each reused ~4x across 237 training pairs
+    when pairs_per_game=None)."""
+    rng = random.Random(seed)
+    train_by_game: dict[str, dict[str, list[dict]]] = {}
+    val_by_game: dict[str, dict[str, list[dict]]] = {}
+    for game, buckets in by_game.items():
+        train_by_game[game] = {}
+        val_by_game[game] = {}
+        for outcome, episodes in buckets.items():
+            episodes = sorted(episodes, key=lambda e: e["episode_id"])
+            rng.shuffle(episodes)
+            n_val = max(1, round(len(episodes) * val_fraction)) if len(episodes) >= 2 else 0
+            val_by_game[game][outcome] = episodes[:n_val]
+            train_by_game[game][outcome] = episodes[n_val:]
+    return train_by_game, val_by_game
 
 
 def make_pairs(
@@ -111,6 +154,8 @@ class EpisodePairDataset(Dataset):
             "lost_input_ids": lost_enc["input_ids"].squeeze(0),
             "lost_attention_mask": lost_enc["attention_mask"].squeeze(0),
             "game": pair["game"],
+            "won_episode_id": pair["won_episode"]["episode_id"],
+            "lost_episode_id": pair["lost_episode"]["episode_id"],
         }
 
 
