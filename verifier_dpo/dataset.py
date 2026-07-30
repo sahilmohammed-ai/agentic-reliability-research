@@ -1,0 +1,134 @@
+"""
+loads labeled trajectory jsons (same files verifier/dataset.py reads) but builds WHOLE-EPISODE
+text blocks and pairs a won episode against a lost episode of the SAME game, instead of flattening
+to per-turn (text, q_value, advantage) examples. no q_value/advantage labels are used at all --
+the only supervision is each episode's real won/lost outcome.
+"""
+
+import glob
+import json
+import os
+import random
+
+import torch
+from torch.utils.data import Dataset
+
+
+def build_episode_text(traj: dict) -> str:
+    """concatenate every worker turn into one block, in the same per-turn shape
+    verifier/dataset.py's build_input_text uses (so the model sees familiar-looking text), but as
+    ONE continuous sequence for the whole episode rather than separate per-turn examples. turns
+    are separated with a marker so per-turn token spans can be recovered later if needed."""
+    lines = [f"Task: {traj['task_goal']}\n\nPlan:\n{traj['plan']}\n"]
+    for turn in traj["turns"]:
+        if turn["role"] != "worker":
+            continue
+        lines.append(
+            f"\n[Turn {turn['step']}]\n"
+            f"Observation:\n{turn['obs_before']}\n"
+            f"Action taken: {turn['action']}"
+        )
+    return "".join(lines)
+
+
+def load_episodes_by_game(labeled_dir: str) -> dict[str, dict[str, list[dict]]]:
+    """returns {game: {"won": [episode_dict, ...], "lost": [episode_dict, ...]}}.
+
+    game is inferred from the filename prefix (e.g. "coin_train_0000.json" -> "coin"), matching
+    the naming convention already used across data/labeled/*."""
+    by_game: dict[str, dict[str, list[dict]]] = {}
+    for path in sorted(glob.glob(os.path.join(labeled_dir, "*.json"))):
+        fname = os.path.basename(path)
+        game = fname.split("_")[0]
+        with open(path) as f:
+            traj = json.load(f)
+
+        worker_turns = [t for t in traj["turns"] if t["role"] == "worker"]
+        if not worker_turns:
+            continue
+
+        entry = {
+            "episode_id": fname,
+            "text": build_episode_text(traj),
+            "won": bool(traj["won"]),
+            "n_turns": len(worker_turns),
+        }
+        bucket = by_game.setdefault(game, {"won": [], "lost": []})
+        bucket["won" if entry["won"] else "lost"].append(entry)
+
+    return by_game
+
+
+def make_pairs(
+    by_game: dict[str, dict[str, list[dict]]], pairs_per_game: int | None = None, seed: int = 42,
+) -> list[dict]:
+    """random-pair one won episode with one lost episode, within the same game. with
+    replacement (sampled independently each draw) since won/lost counts are imbalanced per game
+    (e.g. peckingorder: 237 won vs 63 lost) and we want the smaller class to appear more than
+    once rather than capping every game at its lost-episode count.
+
+    pairs_per_game=None defaults to max(len(won), len(lost)) per game, so each game contributes a
+    comparable number of pairs to the dataset regardless of its win-rate skew."""
+    rng = random.Random(seed)
+    pairs = []
+    for game, buckets in by_game.items():
+        won, lost = buckets["won"], buckets["lost"]
+        if not won or not lost:
+            continue  # need at least one of each outcome to form any pair
+        n = pairs_per_game or max(len(won), len(lost))
+        for _ in range(n):
+            pairs.append({
+                "game": game,
+                "won_episode": rng.choice(won),
+                "lost_episode": rng.choice(lost),
+            })
+    return pairs
+
+
+class EpisodePairDataset(Dataset):
+    """each item is a (won_text, lost_text) pair, tokenized independently (separate sequences,
+    not concatenated -- the preference loss in train.py compares their two summed scores)."""
+
+    def __init__(self, pairs: list[dict], tokenizer, max_length: int = 1024):
+        self.pairs = pairs
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __len__(self) -> int:
+        return len(self.pairs)
+
+    def __getitem__(self, idx: int) -> dict:
+        pair = self.pairs[idx]
+        won_enc = self.tokenizer(
+            pair["won_episode"]["text"], truncation=True, max_length=self.max_length, return_tensors="pt",
+        )
+        lost_enc = self.tokenizer(
+            pair["lost_episode"]["text"], truncation=True, max_length=self.max_length, return_tensors="pt",
+        )
+        return {
+            "won_input_ids": won_enc["input_ids"].squeeze(0),
+            "won_attention_mask": won_enc["attention_mask"].squeeze(0),
+            "lost_input_ids": lost_enc["input_ids"].squeeze(0),
+            "lost_attention_mask": lost_enc["attention_mask"].squeeze(0),
+            "game": pair["game"],
+        }
+
+
+def _pad_stack(seqs: list[torch.Tensor], pad_value: int) -> torch.Tensor:
+    max_len = max(s.size(0) for s in seqs)
+    out = torch.full((len(seqs), max_len), pad_value, dtype=seqs[0].dtype)
+    for i, s in enumerate(seqs):
+        out[i, : s.size(0)] = s
+    return out
+
+
+def collate_fn(batch: list[dict], pad_token_id: int) -> dict:
+    """pads won and lost sequences SEPARATELY (they're independent episodes of possibly very
+    different lengths, not a single padded pair)."""
+    return {
+        "won_input_ids": _pad_stack([b["won_input_ids"] for b in batch], pad_token_id),
+        "won_attention_mask": _pad_stack([b["won_attention_mask"] for b in batch], 0),
+        "lost_input_ids": _pad_stack([b["lost_input_ids"] for b in batch], pad_token_id),
+        "lost_attention_mask": _pad_stack([b["lost_attention_mask"] for b in batch], 0),
+        "games": [b["game"] for b in batch],
+    }
