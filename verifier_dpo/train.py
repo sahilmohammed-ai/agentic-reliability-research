@@ -83,6 +83,59 @@ def _evaluate(model, loader, device) -> tuple[float, float]:
     return total_loss / n, correct / n
 
 
+@torch.no_grad()
+def _length_confound_check(model, loader, device) -> dict:
+    """answers the open question from the 2026-07-29 sanity check: does episode-level
+    pairwise_acc survive controlling for episode LENGTH (token count), or is it substantially
+    riding on the same length shortcut the per-turn readout showed (score_vs_turn_length_correlation
+    = -0.62 on that run)? two things computed on the same val pairs used for val_pairwise_acc:
+
+    1. correlation between episode_score and episode token-length, pooling won+lost together --
+       if strongly negative (mirroring the per-turn finding), the episode-level score is also
+       substantially a length proxy.
+    2. "length-only" pairwise accuracy: for each pair, predict whichever episode is SHORTER as
+       the winner (using length alone, zero model signal) and compare against the true won label.
+       if this length-only heuristic alone gets close to val_pairwise_acc, the trained model isn't
+       adding much beyond what raw length already tells you."""
+    model.eval()
+    scores, lengths, is_won = [], [], []
+    length_only_correct, n_pairs = 0, 0
+
+    for batch in loader:
+        won_scores = model.episode_score(
+            batch["won_input_ids"].to(device), batch["won_attention_mask"].to(device),
+        )
+        lost_scores = model.episode_score(
+            batch["lost_input_ids"].to(device), batch["lost_attention_mask"].to(device),
+        )
+        won_lens = batch["won_attention_mask"].sum(dim=1).tolist()
+        lost_lens = batch["lost_attention_mask"].sum(dim=1).tolist()
+
+        scores.extend(won_scores.tolist() + lost_scores.tolist())
+        lengths.extend(won_lens + lost_lens)
+        is_won.extend([1] * len(won_lens) + [0] * len(lost_lens))
+
+        for wl, ll in zip(won_lens, lost_lens):
+            # length-only heuristic: predict the SHORTER episode is the winner (matches the
+            # direction of the per-turn finding, where shorter turns scored higher)
+            length_only_correct += int(wl < ll)
+            n_pairs += 1
+
+    model.train()
+
+    s_t = torch.tensor(scores)
+    l_t = torch.tensor([float(x) for x in lengths])
+    score_length_corr = 0.0
+    if s_t.std() > 0 and l_t.std() > 0:
+        score_length_corr = torch.corrcoef(torch.stack([s_t, l_t]))[0, 1].item()
+
+    return {
+        "episode_score_vs_length_correlation": round(score_length_corr, 4),
+        "length_only_pairwise_acc": round(length_only_correct / n_pairs, 4) if n_pairs else 0.0,
+        "n_pairs": n_pairs,
+    }
+
+
 def train(
     labeled_dir: str, out_dir: str, freeze_backbone: bool, pairs_per_game: int | None, num_epochs: int,
 ) -> None:
@@ -147,6 +200,17 @@ def train(
     ckpt_path = os.path.join(out_dir, "model.pt")
     torch.save(model.state_dict(), ckpt_path)
     print(f"saved checkpoint -> {ckpt_path}")
+
+    # answers the open question from the prior sanity check (per-turn score_vs_turn_length_
+    # correlation was -0.62 -- does episode-level val_pairwise_acc survive controlling for length,
+    # or is it substantially the same shortcut at a coarser grain?), on the SAME held-out val pairs
+    # already used for val_pairwise_acc above -- no extra data collection needed.
+    confound = _length_confound_check(model, val_loader, device)
+    print("length-confound check (val set):")
+    print(f"  episode_score_vs_length_correlation: {confound['episode_score_vs_length_correlation']}")
+    print(f"  length_only_pairwise_acc (predict shorter=won, zero model signal): "
+          f"{confound['length_only_pairwise_acc']} (n={confound['n_pairs']})")
+    print(f"  for comparison, trained model's val_pairwise_acc: {val_acc:.4f}")
 
 
 if __name__ == "__main__":
