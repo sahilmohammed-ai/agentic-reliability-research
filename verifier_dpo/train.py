@@ -196,6 +196,15 @@ def train(
             print("WARNING: full-finetune on cuda without bitsandbytes, may OOM")
         optimizer = AdamW(trainable, lr=learning_rate)
 
+    # tracks the best-VAL-accuracy epoch's weights separately from whatever epoch finishes last.
+    # added after the first full-finetune run showed classic overfitting (train_acc 0.906->0.995
+    # while val_acc peaked at epoch 1 then DROPPED, 0.9363->0.9172 at epoch 2) -- same pattern
+    # verifier/train.py's build 11 saw with the main verifier ("val loss bottomed at epoch 2 then
+    # rose... 2 epochs optimal at this scale"). saving only the last epoch, as this did before,
+    # silently keeps the overfit checkpoint instead of the one that actually generalizes best.
+    best_val_acc = -1.0
+    best_state = None
+
     model.train()
     step = 0
     for epoch in range(num_epochs):
@@ -228,9 +237,26 @@ def train(
             f"val_avg_loss={val_loss:.4f} val_pairwise_acc={val_acc:.4f}"
         )
 
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            print(f"  (new best val_pairwise_acc: {best_val_acc:.4f}, epoch {epoch})")
+
+    # save BOTH: model.pt (best-val checkpoint, the one to actually use) and model_last.pt (final
+    # epoch, kept only as a fallback/comparison -- same naming convention as
+    # checkpoints/verifier_v1's verifier.pt / verifier_last.pt split).
+    last_ckpt_path = os.path.join(out_dir, "model_last.pt")
+    torch.save(model.state_dict(), last_ckpt_path)
+    print(f"saved final-epoch checkpoint -> {last_ckpt_path}")
+
     ckpt_path = os.path.join(out_dir, "model.pt")
-    torch.save(model.state_dict(), ckpt_path)
-    print(f"saved checkpoint -> {ckpt_path}")
+    if best_state is not None:
+        torch.save(best_state, ckpt_path)
+        model.load_state_dict(best_state)  # so the confound check below runs on the BEST checkpoint
+        print(f"saved best-val checkpoint (val_pairwise_acc={best_val_acc:.4f}) -> {ckpt_path}")
+    else:
+        torch.save(model.state_dict(), ckpt_path)
+        print(f"saved checkpoint -> {ckpt_path}")
 
     # answers the open question from the prior sanity check (per-turn score_vs_turn_length_
     # correlation was -0.62 -- does episode-level val_pairwise_acc survive controlling for length,
@@ -241,7 +267,7 @@ def train(
     print(f"  episode_score_vs_length_correlation: {confound['episode_score_vs_length_correlation']}")
     print(f"  length_only_pairwise_acc (predict shorter=won, zero model signal): "
           f"{confound['length_only_pairwise_acc']} (n={confound['n_pairs']})")
-    print(f"  for comparison, trained model's val_pairwise_acc: {val_acc:.4f}")
+    print(f"  for comparison, BEST checkpoint's val_pairwise_acc: {best_val_acc if best_state is not None else val_acc:.4f}")
 
 
 if __name__ == "__main__":
