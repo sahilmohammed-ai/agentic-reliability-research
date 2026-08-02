@@ -32,13 +32,19 @@ def act(
     history: list[str] | None = None,
     model: str = "claude-haiku-4-5-20251001",
     env_hint: str = "",
+    temperature: float = 0.0,
 ) -> tuple[str, dict]:
     """select one admissible command that best advances the plan.
 
     returns (action, usage) where usage is the token counts for this call, so the runner can
     log per-turn cost. env_hint is optional environment-specific guidance injected into the
     prompt (e.g. a warning about scienceworld's irreversible 'focus on' action). empty for
-    alfworld, so the two environments stay comparable except where an env genuinely needs a caveat."""
+    alfworld, so the two environments stay comparable except where an env genuinely needs a caveat.
+
+    temperature=0.0 (default) is the existing deterministic/greedy behavior every current caller
+    relies on -- unchanged. only scripts/best_of_n_eval.py passes a nonzero value, to sample N
+    genuinely different candidate actions at the same state (impossible under greedy decoding,
+    which would just return the identical action N times)."""
     # optionally include last few actions for context
     history_block = ""
     if history:
@@ -61,7 +67,7 @@ def act(
     # max_tokens=1024: claude-sonnet-5 sometimes thinks before answering on longer prompts (this
     # one includes the full admissible-commands list + history), and a too-small budget can get
     # entirely consumed by thinking with no room left for the actual answer.
-    raw, usage = complete_with_usage(model, SYSTEM, prompt, max_tokens=1024)
+    raw, usage = complete_with_usage(model, SYSTEM, prompt, max_tokens=1024, temperature=temperature)
 
     # match model's output format to actual command. previously the raw output and whether a
     # fallback fired were both discarded, so it was impossible to tell "the model genuinely chose

@@ -79,13 +79,23 @@ def complete(model: str, system: str, prompt: str, max_tokens: int) -> str:
     return text
 
 
-def complete_with_usage(model: str, system: str, prompt: str, max_tokens: int) -> tuple[str, dict]:
+def complete_with_usage(
+    model: str, system: str, prompt: str, max_tokens: int, temperature: float = 0.0,
+) -> tuple[str, dict]:
     """single-turn completion returning (text, usage), routed to hf, ollama, or anthropic.
 
     usage is {"prompt_tokens": int, "completion_tokens": int}. all three backends report these
     natively (anthropic via message.usage, ollama via *_eval_count, hf via tensor lengths), so
     the counts are exact per-backend rather than estimated. this is what lets us track cost /
-    token usage per rollout turn, the mentor-requested efficiency metric."""
+    token usage per rollout turn, the mentor-requested efficiency metric.
+
+    temperature=0.0 (default) preserves the EXACT prior greedy/deterministic behavior for every
+    existing caller (thinker.plan(), worker.act(), verifier prompting) -- do not change this
+    default. only added so scripts/best_of_n_eval.py can request real sample diversity across
+    repeated calls at the identical state; every other call site is unaffected. only the HF
+    backend honors this (the only backend this project's cost-discipline rule allows for
+    diversity-requiring sampling); ollama/openai/anthropic paths ignore it and stay greedy/
+    provider-default, since no caller currently needs sampling diversity from them."""
     if is_hf_model(model):
         repo_id = model[len("hf:"):]
         hf_model, tokenizer, device = _get_hf_model(repo_id)
@@ -100,11 +110,13 @@ def complete_with_usage(model: str, system: str, prompt: str, max_tokens: int) -
             messages, add_generation_prompt=True, tokenize=True,
             return_dict=True, return_tensors="pt",
         ).to(device)
+        do_sample = temperature > 0.0
         with torch.no_grad():
             output_ids = hf_model.generate(
                 **encoded,
                 max_new_tokens=max_tokens,
-                do_sample=False,  # greedy, matches the deterministic single-choice framing of act()/plan()
+                do_sample=do_sample,
+                temperature=temperature if do_sample else None,
                 pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
             )
         # slice off the prompt tokens, only decode what the model actually generated
