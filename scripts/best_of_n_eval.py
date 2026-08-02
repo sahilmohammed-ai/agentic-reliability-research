@@ -208,6 +208,14 @@ def evaluate(
 
     results = {"scorer": scorer, "n": n, "games": {}}
 
+    # save Best-of-N episode traces (candidates + scores at every turn, plus the plain baseline
+    # trajectory for comparison) -- added after the first real run's results.json turned out to
+    # contain only aggregate win rates, with no way to inspect WHY a game like mapreader stayed at
+    # 0% under both conditions (worker capability gap vs. some best-of-n-specific issue) without
+    # rerunning. traces_dir defaults alongside out_path so this doesn't need a new CLI flag.
+    traces_dir = os.path.join(os.path.dirname(out_path) or ".", f"best_of_n_traces_{scorer}")
+    os.makedirs(traces_dir, exist_ok=True)
+
     for game in games:
         baseline_won, bon_won = 0, 0
         for i in range(episodes_per_game):
@@ -222,6 +230,12 @@ def evaluate(
             )
             bon_won += int(bon_traj.won)
             env.close()
+
+            with open(os.path.join(traces_dir, f"{game}_{i:03d}.json"), "w") as f:
+                json.dump({
+                    "baseline": baseline_traj.to_dict(),
+                    "best_of_n": bon_traj.to_dict(),
+                }, f, indent=2)
 
             print(f"  [{game} {i+1}/{episodes_per_game}] baseline={'WIN' if baseline_traj.won else 'lose'} "
                   f"best_of_n={'WIN' if bon_traj.won else 'lose'}", flush=True)
