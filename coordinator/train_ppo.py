@@ -59,6 +59,7 @@ from coordinator.model import ACTIONS, BASE_MODEL, CoordinatorModel
 from envs.textworldexpress_env import TextWorldExpressEnvWrapper, TRAINING_GAMES
 from rollout.runner import run_learned_coordinated_episode
 from verifier.infer import Verifier
+from verifier_dpo.live_infer import LiveVerifierDPO
 
 CLIP_EPS = 0.2          # PPO clipped-objective epsilon
 PPO_EPOCHS = 4           # optimization passes over each collected batch
@@ -234,6 +235,7 @@ def train(
     worker_model: str = "hf:Qwen/Qwen2.5-3B-Instruct",
     learning_rate: float = LEARNING_RATE,
     resume_from: str | None = None,
+    verifier_type: str = "v5",
 ) -> None:
     device = torch.device("cuda") if torch.cuda.is_available() else (
         torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
@@ -253,7 +255,18 @@ def train(
         print(f"resumed policy weights from {resume_from}", flush=True)
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=learning_rate)
 
-    verifier = Verifier(verifier_checkpoint, bound_q_value=False)  # v5 was trained --unbounded-q-value
+    # verifier_type="dpo" (2026-08-02, build 14 follow-up): an honest TEST of whether build 13's
+    # same-state-indifference diagnosis is specific to verifier_v5 or a broader property of this
+    # environment/reward-construction approach. verifier_dpo showed a real Best-of-N win-rate lift
+    # (build 14, coin 0%->65%) but ALSO showed the same near-identical-score behavior on opposite
+    # actions at one state (mapreader trace, 7.407 vs 7.392) that flatlined coordinator_v5's
+    # nonzero_frac -- going in expecting this might reproduce the same flat result, not assuming a
+    # "better" verifier by Best-of-N/AUC standards automatically fixes a same-state RL reward.
+    if verifier_type == "dpo":
+        verifier = LiveVerifierDPO(verifier_checkpoint)
+        print(f"using verifier_dpo (LiveVerifierDPO) checkpoint: {verifier_checkpoint}", flush=True)
+    else:
+        verifier = Verifier(verifier_checkpoint, bound_q_value=False)  # v5 was trained --unbounded-q-value
     os.makedirs(out_dir, exist_ok=True)
 
     for it in range(1, iterations + 1):
@@ -341,6 +354,10 @@ class _LivePolicyAdapter:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--verifier-checkpoint", type=str, default="checkpoints/verifier_v5")
+    parser.add_argument("--verifier-type", choices=["v5", "dpo"], default="v5",
+                         help="v5: verifier.infer.Verifier (checkpoints/verifier_v5/verifier.pt). "
+                              "dpo: verifier_dpo.live_infer.LiveVerifierDPO (pass --verifier-checkpoint "
+                              "pointing at a verifier_dpo/checkpoints/*/model.pt file directly, not a dir).")
     parser.add_argument("--out", type=str, required=True)
     parser.add_argument("--iterations", type=int, default=10)
     parser.add_argument("--episodes-per-iter", type=int, default=40)
@@ -350,5 +367,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     train(
         args.verifier_checkpoint, args.out, args.iterations, args.episodes_per_iter,
-        args.worker_model, args.lr, args.resume_from,
+        args.worker_model, args.lr, args.resume_from, args.verifier_type,
     )

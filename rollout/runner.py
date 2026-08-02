@@ -777,6 +777,18 @@ def run_learned_coordinated_episode(
 
     ep_plan, initial_plan_usage = thinker.plan(task_goal, obs, model=model)
 
+    # duck-typed hook, not a hard dependency: verifier.infer.Verifier has no episode-boundary
+    # concept (each .score() call is independent of every other), so this is a no-op for it. only
+    # verifier_dpo.live_infer.LiveVerifierDPO defines reset_episode() -- its score is a property of
+    # the whole episode-so-far (growing-prefix text, see that module's docstring), so it needs to
+    # know when a new episode starts or it would silently keep appending this episode's turns onto
+    # the PREVIOUS episode's tracked text, corrupting every score after the first episode in a
+    # batch. added specifically to let coordinator/train_ppo.py's collect_batch() swap in
+    # verifier_dpo as an honest test of build 13's diagnosis, without needing runner.py to import
+    # or know anything about verifier_dpo directly.
+    if hasattr(verifier, "reset_episode"):
+        verifier.reset_episode(task_goal, ep_plan)
+
     done = False
     current_obs = obs
     pending_plan_usage = initial_plan_usage
@@ -857,8 +869,16 @@ def run_learned_coordinated_episode(
                 task_goal, ep_plan, current_obs, admissible, action_history[:-1],
                 model=model, env_hint=env_hint,
             )
+            # commit=False (duck-typed, verifier.infer.Verifier has no such param and ignores it
+            # via **{} below): this counterfactual action was NEVER stepped into the environment,
+            # only asked "what would continue have done" to compute a baseline. verifier.infer.
+            # Verifier scores each call independently regardless (stateless per-turn), but
+            # verifier_dpo.live_infer.LiveVerifierDPO tracks a growing episode-so-far and would
+            # otherwise wrongly append this hypothetical turn to it, corrupting every real turn's
+            # score after this point in the episode.
+            commit_kwarg = {"commit": False} if hasattr(verifier, "reset_episode") else {}
             _, counterfactual_advantage = verifier.score(
-                task_goal, ep_plan, current_obs, counterfactual_action,
+                task_goal, ep_plan, current_obs, counterfactual_action, **commit_kwarg,
             )
             coordinator_reward = advantage - counterfactual_advantage
 
