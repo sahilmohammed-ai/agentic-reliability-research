@@ -36,13 +36,25 @@ from verifier_dpo.dataset import (
 )
 from verifier_dpo.model import BASE_MODEL, PreferenceScorer
 
-BATCH_SIZE = 2
+# 8-bit adamw reduces optimizer state memory on cuda (needed for full fine-tune), same pattern as
+# verifier/train.py -- 1.5B backbone here is smaller than that file's 3B, but full backprop
+# through all backbone layers is still real memory pressure a frozen-head run never pays.
+try:
+    import bitsandbytes as bnb
+    HAS_BITSANDBYTES = True
+except ImportError:
+    HAS_BITSANDBYTES = False
+
+BATCH_SIZE = 2               # frozen-head default (use --batch-size for full fine-tune)
 # lowered from 1e-3 after review (2026-07-29): the first GPU run showed most individual step
 # losses saturated at exactly 0.0000 with occasional spikes to 100+ (a few high-confidence-gap
 # pairs dominating each batch's gradient) -- switching episode_score() from sum to mean pooling
 # (see model.py) fixed the length-dependence but not this instability by itself. a lower lr plus
 # grad clipping (below) reduces how much any single outlier pair's gradient can move the head.
-LEARNING_RATE = 2e-4
+LEARNING_RATE = 2e-4          # frozen-head default (use --lr ~1e-5 for full fine-tune, matches
+                               # verifier/train.py's full-finetune rate -- fine-tuning a whole
+                               # pretrained model needs a much smaller step than training a fresh
+                               # linear head from scratch)
 MAX_GRAD_NORM = 1.0    # added for the same reason -- caps any one batch's gradient magnitude
 NUM_EPOCHS = 3
 LOG_EVERY = 20
@@ -55,11 +67,13 @@ def preference_loss(won_scores: torch.Tensor, lost_scores: torch.Tensor) -> torc
     return -torch.nn.functional.logsigmoid(won_scores - lost_scores).mean()
 
 
-def _make_loader(by_game: dict, pairs_per_game, tokenizer, shuffle: bool) -> DataLoader:
+def _make_loader(
+    by_game: dict, pairs_per_game, tokenizer, shuffle: bool, batch_size: int = BATCH_SIZE,
+) -> DataLoader:
     pairs = make_pairs(by_game, pairs_per_game=pairs_per_game)
     dataset = EpisodePairDataset(pairs, tokenizer)
     return DataLoader(
-        dataset, batch_size=BATCH_SIZE, shuffle=shuffle,
+        dataset, batch_size=batch_size, shuffle=shuffle,
         collate_fn=lambda b: collate_fn(b, tokenizer.pad_token_id),
     ), len(pairs)
 
@@ -138,6 +152,7 @@ def _length_confound_check(model, loader, device) -> dict:
 
 def train(
     labeled_dir: str, out_dir: str, freeze_backbone: bool, pairs_per_game: int | None, num_epochs: int,
+    learning_rate: float, batch_size: int,
 ) -> None:
     os.makedirs(out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -157,13 +172,29 @@ def train(
     # no episode's text appears in both a training pair and a validation pair.
     train_by_game, val_by_game = split_by_game(by_game, val_fraction=VAL_FRACTION)
 
-    train_loader, n_train_pairs = _make_loader(train_by_game, pairs_per_game, tokenizer, shuffle=True)
-    val_loader, n_val_pairs = _make_loader(val_by_game, pairs_per_game, tokenizer, shuffle=False)
+    train_loader, n_train_pairs = _make_loader(
+        train_by_game, pairs_per_game, tokenizer, shuffle=True, batch_size=batch_size,
+    )
+    val_loader, n_val_pairs = _make_loader(
+        val_by_game, pairs_per_game, tokenizer, shuffle=False, batch_size=batch_size,
+    )
     print(f"train pairs: {n_train_pairs}, val pairs: {n_val_pairs}")
 
     model = PreferenceScorer(freeze_backbone=freeze_backbone).to(device)
     trainable = [p for p in model.parameters() if p.requires_grad]
-    optimizer = AdamW(trainable, lr=LEARNING_RATE)
+    print(f"trainable parameters: {sum(p.numel() for p in trainable):,}")
+
+    # 8-bit optimizer on cuda for full fine-tune, same pattern as verifier/train.py -- plain
+    # AdamW's fp32 momentum+variance buffers (2x params x 4 bytes) is real memory pressure once
+    # gradients flow through all of a 1.5B backbone's layers, not just one linear head.
+    use_8bit = (not freeze_backbone) and device.type == "cuda" and HAS_BITSANDBYTES
+    if use_8bit:
+        optimizer = bnb.optim.AdamW8bit(trainable, lr=learning_rate)
+        print("using 8-bit AdamW (bitsandbytes)")
+    else:
+        if (not freeze_backbone) and device.type == "cuda" and not HAS_BITSANDBYTES:
+            print("WARNING: full-finetune on cuda without bitsandbytes, may OOM")
+        optimizer = AdamW(trainable, lr=learning_rate)
 
     model.train()
     step = 0
@@ -221,5 +252,14 @@ if __name__ == "__main__":
     parser.add_argument("--no-freeze-backbone", dest="freeze_backbone", action="store_false")
     parser.add_argument("--pairs-per-game", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
+    parser.add_argument("--lr", type=float, default=None,
+                         help="default: 2e-4 if frozen-backbone, 1e-5 if --no-freeze-backbone "
+                              "(full fine-tune needs a much smaller step)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                         help="default: 2 if frozen-backbone, 1 if --no-freeze-backbone "
+                              "(full backprop through the backbone is far more memory per example)")
     args = parser.parse_args()
-    train(args.labeled_dir, args.out, args.freeze_backbone, args.pairs_per_game, args.epochs)
+
+    lr = args.lr if args.lr is not None else (LEARNING_RATE if args.freeze_backbone else 1e-5)
+    bs = args.batch_size if args.batch_size is not None else (BATCH_SIZE if args.freeze_backbone else 1)
+    train(args.labeled_dir, args.out, args.freeze_backbone, args.pairs_per_game, args.epochs, lr, bs)
