@@ -171,6 +171,7 @@ def run_baseline_episode(env, worker_model: str, task_id: str | None = None) -> 
 def evaluate(
     scorer: str, n: int, episodes_per_game: int, worker_model: str,
     checkpoint_dir: str, dpo_checkpoint: str, split: str, out_path: str,
+    games: tuple[str, ...] | None = None,
 ) -> None:
     """NOTE on methodology: baseline and best-of-n episodes are run on INDEPENDENT env resets
     (TextWorldExpressEnvWrapper.reset() draws a new random seed each call, confirmed in
@@ -178,7 +179,7 @@ def evaluate(
     NOT the same underlying task instance, matching how builds 03/10-12 were evaluated (each run
     draws fresh, no fixed-seed pairing). only the AGGREGATE win rate over episodes_per_game is a
     meaningful comparison; individual per-episode print lines are not a controlled pairwise A/B."""
-    games = TRAINING_GAMES
+    games = games or TRAINING_GAMES
 
     if scorer == "v5":
         from verifier.infer import Verifier
@@ -278,8 +279,13 @@ if __name__ == "__main__":
                          default="verifier_dpo/checkpoints/finetune_v2/model.pt")
     parser.add_argument("--split", type=str, default="eval_ood")
     parser.add_argument("--out", type=str, default="reports/best_of_n_results.json")
+    parser.add_argument("--games", type=str, default=None,
+                         help="comma-separated subset of TRAINING_GAMES (default: all 4) -- "
+                              "e.g. --games mapreader to re-check one game's traces cheaply "
+                              "without rerunning the full sweep")
     args = parser.parse_args()
+    games = tuple(args.games.split(",")) if args.games else None
     evaluate(
         args.scorer, args.n, args.episodes_per_game, args.worker_model,
-        args.checkpoint_dir, args.dpo_checkpoint, args.split, args.out,
+        args.checkpoint_dir, args.dpo_checkpoint, args.split, args.out, games=games,
     )
