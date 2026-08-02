@@ -187,12 +187,12 @@ def train(
     # 8-bit optimizer on cuda for full fine-tune, same pattern as verifier/train.py -- plain
     # AdamW's fp32 momentum+variance buffers (2x params x 4 bytes) is real memory pressure once
     # gradients flow through all of a 1.5B backbone's layers, not just one linear head.
-    use_8bit = (not freeze_backbone) and device.type == "cuda" and HAS_BITSANDBYTES
+    use_8bit = (not freeze_backbone) and device == "cuda" and HAS_BITSANDBYTES
     if use_8bit:
         optimizer = bnb.optim.AdamW8bit(trainable, lr=learning_rate)
         print("using 8-bit AdamW (bitsandbytes)")
     else:
-        if (not freeze_backbone) and device.type == "cuda" and not HAS_BITSANDBYTES:
+        if (not freeze_backbone) and device == "cuda" and not HAS_BITSANDBYTES:
             print("WARNING: full-finetune on cuda without bitsandbytes, may OOM")
         optimizer = AdamW(trainable, lr=learning_rate)
 
