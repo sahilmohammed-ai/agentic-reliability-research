@@ -25,6 +25,7 @@ from coordinator.infer import CoordinatorPolicy
 from envs.textworldexpress_env import TextWorldExpressEnvWrapper, TRAINING_GAMES
 from rollout.runner import run_episode, run_learned_coordinated_episode
 from verifier.infer import Verifier
+from verifier_dpo.live_infer import LiveVerifierDPO
 
 
 def run_condition(
@@ -81,10 +82,19 @@ def run_condition(
 
 def main(
     coordinator_checkpoint: str, verifier_checkpoint: str, n_per_game: int,
-    worker_model: str, out_path: str, split: str = "eval_ood",
+    worker_model: str, out_path: str, split: str = "eval_ood", verifier_type: str = "v5",
 ) -> None:
     coordinator = CoordinatorPolicy(coordinator_checkpoint)
-    verifier = Verifier(verifier_checkpoint, bound_q_value=False)
+    # must match whichever verifier_type the coordinator checkpoint was TRAINED with
+    # (coordinator/train_ppo.py's --verifier-type) -- a coordinator trained against
+    # verifier_dpo's LiveVerifierDPO input distribution (q_value/advantage scale, growing-prefix
+    # semantics) evaluated here against verifier.infer.Verifier would silently feed it
+    # out-of-distribution state text, not just fail to load.
+    if verifier_type == "dpo":
+        verifier = LiveVerifierDPO(verifier_checkpoint)
+        print(f"using verifier_dpo (LiveVerifierDPO) checkpoint: {verifier_checkpoint}", flush=True)
+    else:
+        verifier = Verifier(verifier_checkpoint, bound_q_value=False)
 
     def learned_episode_fn(env, task_id, model):
         return run_learned_coordinated_episode(
@@ -129,6 +139,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--coordinator-checkpoint", type=str, required=True)
     parser.add_argument("--verifier-checkpoint", type=str, default="checkpoints/verifier_v5")
+    parser.add_argument("--verifier-type", choices=["v5", "dpo"], default="v5",
+                         help="must match whichever --verifier-type the coordinator checkpoint "
+                              "was trained with (coordinator/train_ppo.py). dpo: pass "
+                              "--verifier-checkpoint pointing at a verifier_dpo/checkpoints/*/"
+                              "model.pt file directly, not a directory.")
     parser.add_argument("--n-per-game", type=int, default=30)
     parser.add_argument("--worker-model", type=str, default="hf:Qwen/Qwen2.5-3B-Instruct")
     parser.add_argument("--out", type=str, required=True)
@@ -136,5 +151,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     main(
         args.coordinator_checkpoint, args.verifier_checkpoint, args.n_per_game,
-        args.worker_model, args.out, args.split,
+        args.worker_model, args.out, args.split, args.verifier_type,
     )
