@@ -1,18 +1,22 @@
 """
-collect BRANCHING rollouts for verifier_v6: at K decision points per episode, sample 2 DIFFERENT
-worker actions from the SAME state, let each branch continue independently to episode end, and
-record each branch's own REAL Monte-Carlo return-to-go. produces genuine (state, action_A, G_A)
-vs (state, action_B, G_B) pairs where G_A != G_B reflects a real downstream outcome difference --
-the signal missing from the single-linear-trajectory data verifier_v1-v5 were trained on.
+collect BRANCHING rollouts: at K decision points per episode, sample 2 DIFFERENT worker actions
+from the SAME state, let each branch continue independently to episode end, and record each
+branch's own REAL Monte-Carlo return-to-go. produces genuine (state, action_A, G_A) vs
+(state, action_B, G_B) pairs where G_A != G_B reflects a real downstream outcome difference --
+the signal missing from the single-linear-trajectory data the trained verifier (verifier_mc) was
+trained on.
 
-root cause this targets (see .info/CLAUDE.md's build 13 section, "verifier_v6" note): verifier_v5's
-advantage label is `q_value_t - q_value_{t-1}`, which does NOT depend on the action taken at turn
-t (q_value_{t-1} is the PREVIOUS turn's return, unaffected by what's chosen next) -- confirmed via
-direct algebraic derivation as the reason only ~11-14% of coordinator_v5's counterfactual reward
-comparisons came out nonzero. this script does not fix the labeling formula by itself; it supplies
-the missing PAIRED data so verifier/train.py can add a pairwise ranking loss term (see that file's
+root cause this targets: verifier_mc's advantage label is `q_value_t - q_value_{t-1}`, which does
+NOT depend on the action taken at turn t (q_value_{t-1} is the PREVIOUS turn's return, unaffected
+by what's chosen next). this script does not fix the labeling formula by itself; it supplies the
+missing PAIRED data so verifier/train.py can add a pairwise ranking loss term (see that file's
 --branch-pairs flag) that directly penalizes the model for scoring two different-outcome actions
 at the same state too similarly.
+
+(historical note: this experiment was tried and abandoned -- a local smoke test showed most
+branch pairs collapse to G_A == G_B, since TextWorldExpress's reward is too sparse/terminal-
+concentrated for two branches to reliably diverge in return, regardless of how different the
+branch-point action was. kept as documented history, not an active path.)
 
 mechanism: run a normal episode first to get a real trajectory of length T. pick K decision points
 (evenly spaced, skipping the first few and last few turns so branches have real tails to diverge

@@ -7,30 +7,31 @@ mechanism: at each worker turn, sample N candidate actions from the SAME frozen 
 (temperature > 0, genuinely different candidates -- greedy decoding would return the identical
 action N times, see agents/llm.py's temperature parameter added for exactly this), score each
 candidate with a verifier, execute the argmax-scoring one. compares against N=1 greedy
-(rollout/runner.py's run_episode, completely unmodified zero-coordination baseline) on the SAME
-eval_ood set builds 10-12 used.
+(rollout/runner.py's run_episode, completely unmodified zero-coordination baseline) on the same
+held-out eval_ood set used throughout the verifier evaluation history.
 
 what this tests and does NOT test: this only needs the verifier to rank a handful of DIFFERENT
 candidates against each other at the SAME turn -- the coarse, aggregate-level discrimination both
-verifier_v5 (AUC 0.56-0.84, build 12) and verifier_dpo (92.99% episode-level held-out accuracy,
-solidification sweep) have already demonstrated. it does NOT require fine-grained same-state
-action discrimination the way a policy-gradient reward would -- Best-of-N just needs "of these N
-options, which does the verifier prefer," which is exactly the kind of discrimination the AUC/
-accuracy numbers already certify. build 14's result: a real win-rate lift on coin (0%->65% with
-verifier_dpo, 0%->35% with v5), the first result in this project to move that game off zero,
-direct evidence the verifier's signal is applicable, not just statistically separable offline.
+verifier_mc (AUC 0.56-0.84, MC-return-labeled, balanced training data) and verifier_dpo
+(92.99% episode-level held-out accuracy, preference-trained) have already demonstrated. it does
+NOT require fine-grained same-state action discrimination the way a policy-gradient reward would
+-- Best-of-N just needs "of these N options, which does the verifier prefer," which is exactly
+the kind of discrimination the AUC/accuracy numbers already certify. real result: a win-rate lift
+on coin (0%->65% with verifier_dpo, 0%->35% with verifier_mc), the first result in this project
+to move that game off zero, direct evidence the verifier's signal is applicable, not just
+statistically separable offline.
 
 supports scoring candidates with EITHER verifier via --scorer:
-  - v5: verifier.infer.Verifier (checkpoints/verifier_v5), uses .advantage on each candidate turn.
+  - mc: verifier.infer.Verifier (checkpoints/verifier_mc), uses .advantage on each candidate turn.
   - dpo: verifier_dpo's PreferenceScorer, uses the mean per-token score of the trajectory-so-far
     WITH the candidate action appended (a growing-prefix episode_score call), since verifier_dpo
     was trained on whole-episode text, not isolated single turns -- scoring a bare single turn in
-    verifier_v5's per-turn format would be off-distribution for it (the same train/inference
+    verifier_mc's per-turn format would be off-distribution for it (the same train/inference
     mismatch class of bug already found and fixed once in verifier_dpo/infer.py).
 
 usage:
-    python -m scripts.best_of_n_eval --scorer v5 --n 5 --episodes-per-game 20 \\
-        --worker-model hf:Qwen/Qwen2.5-3B-Instruct --out reports/best_of_n_v5.json
+    python -m scripts.best_of_n_eval --scorer mc --n 5 --episodes-per-game 20 \\
+        --worker-model hf:Qwen/Qwen2.5-3B-Instruct --out reports/best_of_n_mc.json
     python -m scripts.best_of_n_eval --scorer dpo --n 5 --episodes-per-game 20 \\
         --dpo-checkpoint verifier_dpo/checkpoints/finetune_v2/model.pt \\
         --worker-model hf:Qwen/Qwen2.5-3B-Instruct --out reports/best_of_n_dpo.json
@@ -52,7 +53,7 @@ TEMPERATURE = 0.8  # standard, moderate sampling temperature for real candidate 
                     # without degenerating into near-random/incoherent actions
 
 
-def _score_candidates_v5(verifier_obj, task_goal, plan, obs, candidates):
+def _score_candidates_mc(verifier_obj, task_goal, plan, obs, candidates):
     """returns per-candidate advantage scores via verifier.infer.Verifier.score_batch()."""
     items = [(task_goal, plan, obs, action) for action in candidates]
     results = verifier_obj.score_batch(items)  # list of (q_value, advantage)
@@ -182,12 +183,12 @@ def evaluate(
     meaningful comparison; individual per-episode print lines are not a controlled pairwise A/B."""
     games = games or TRAINING_GAMES
 
-    if scorer == "v5":
+    if scorer == "mc":
         from verifier.infer import Verifier
         verifier_obj = Verifier(checkpoint_dir)
 
         def score_fn(task_goal, plan, obs, candidates, _traj_so_far):
-            return _score_candidates_v5(verifier_obj, task_goal, plan, obs, candidates)
+            return _score_candidates_mc(verifier_obj, task_goal, plan, obs, candidates)
 
     elif scorer == "dpo":
         import torch
@@ -271,11 +272,11 @@ def evaluate(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scorer", choices=["v5", "dpo"], required=True)
+    parser.add_argument("--scorer", choices=["mc", "dpo"], required=True)
     parser.add_argument("--n", type=int, default=5)
     parser.add_argument("--episodes-per-game", type=int, default=20)
     parser.add_argument("--worker-model", type=str, default="hf:Qwen/Qwen2.5-3B-Instruct")
-    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/verifier_v5")
+    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints/verifier_mc")
     parser.add_argument("--dpo-checkpoint", type=str,
                          default="verifier_dpo/checkpoints/finetune_v2/model.pt")
     parser.add_argument("--split", type=str, default="eval_ood")

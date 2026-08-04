@@ -9,7 +9,7 @@ a genuine held-out evaluation, not a memorization check. cookingworld is exclude
 the training mix in build 11).
 
 usage:
-    python -m scripts.score_trained_verifier --checkpoint checkpoints/verifier_v5 \\
+    python -m scripts.score_trained_verifier --checkpoint checkpoints/verifier_mc \\
         --out data/labeled/v5_eval_scores.json
 """
 
@@ -70,7 +70,7 @@ def main(checkpoint_dir: str, out_path: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/verifier_v5")
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/verifier_mc")
     parser.add_argument("--out", type=str, default="data/labeled/v5_eval_scores.json")
     args = parser.parse_args()
     main(args.checkpoint, args.out)
