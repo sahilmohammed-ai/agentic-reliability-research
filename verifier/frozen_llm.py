@@ -47,6 +47,66 @@ Reasoning: <one sentence>
 Score: <a single number between 0.0 and 1.0>"""
 
 
+# pre-hoc variant of SYSTEM, for scoring a CANDIDATE action before it's executed (needed for
+# Best-of-N: candidates must be ranked before one is chosen, so obs_after doesn't exist yet).
+# added 2026-08-04 as a genuinely NEW verifier variant, not a modification of score_turn/SYSTEM
+# above -- build 08/09's post-hoc judge (scores an action's actual observed result) is a
+# different, already-validated task from this one (predict an action's quality from intent alone,
+# before seeing what happens). kept as a separate function/prompt so the original's numbers stay
+# reproducible and this one gets its own honest validation rather than inheriting unearned trust
+# from a different task.
+SYSTEM_PREHOC = """\
+You are a progress verifier for an agent acting in a text-based environment.
+You will be given the task goal, the full sequence of actions taken so far in this episode, the
+current observation, and a candidate action the agent is considering. Judge how good this
+CANDIDATE action would be, based only on what's known right now -- you will NOT see the result of
+taking it.
+
+Judge based on whether this action is a sensible, on-track move given the goal, the plan so far,
+and the current observation. Ask: "given everything tried so far and the current observation, is
+this a good thing to do right now?"
+
+0.0 means the action is clearly wrong, repeats something already tried with no reason to expect a
+different result, or moves away from the goal. 0.5 means the action is reasonable but uncertain or
+exploratory (e.g. a sensible guess when the right move genuinely isn't clear yet). 1.0 means the
+action is clearly correct given the situation.
+
+First, in one sentence, state whether the action seems correct and why. Then output a score.
+
+Output in exactly this format:
+Reasoning: <one sentence>
+Score: <a single number between 0.0 and 1.0>"""
+
+
+def score_candidate(
+    task_goal: str,
+    action_history: list[str],
+    obs_before: str,
+    action: str,
+    model: str = "hf:Qwen/Qwen2.5-3B-Instruct",
+) -> tuple[float, dict]:
+    """score one CANDIDATE action's predicted quality with a frozen (untrained) LLM judge, BEFORE
+    it's executed -- no obs_after, since the whole point is ranking candidates prior to knowing
+    their outcome (see scripts/best_of_n_eval.py). returns (score, usage).
+
+    action_history is everything taken BEFORE this turn (not including `action`), same context
+    score_turn() gets, for a like-for-like comparison of judgment quality between the two tasks."""
+    history_block = (
+        "\n".join(f"- {a}" for a in action_history) if action_history else "(no actions yet)"
+    )
+    prompt = (
+        f"Task: {task_goal}\n\n"
+        f"Actions taken so far:\n{history_block}\n\n"
+        f"Current observation: {obs_before}\n"
+        f"Candidate action: {action}\n\n"
+        "Reasoning and score for this candidate action:"
+    )
+    raw, usage = complete_with_usage(model, SYSTEM_PREHOC, prompt, max_tokens=1024)
+    score = _parse_score(raw)
+    usage["raw_output"] = raw
+    return score, usage
+
+
 def _parse_score(raw: str) -> float:
     """extract a float in [0, 1] from the judge's "Score: <number>" line, clamping out-of-range
     values. falls back to searching the whole output if the "Score:" label is missing (e.g. the

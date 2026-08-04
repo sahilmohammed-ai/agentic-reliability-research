@@ -21,13 +21,26 @@ on coin (0%->65% with verifier_dpo, 0%->35% with verifier_mc), the first result 
 to move that game off zero, direct evidence the verifier's signal is applicable, not just
 statistically separable offline.
 
-supports scoring candidates with EITHER verifier via --scorer:
+supports scoring candidates with any of THREE verifiers via --scorer:
   - mc: verifier.infer.Verifier (checkpoints/verifier_mc), uses .advantage on each candidate turn.
   - dpo: verifier_dpo's PreferenceScorer, uses the mean per-token score of the trajectory-so-far
     WITH the candidate action appended (a growing-prefix episode_score call), since verifier_dpo
     was trained on whole-episode text, not isolated single turns -- scoring a bare single turn in
     verifier_mc's per-turn format would be off-distribution for it (the same train/inference
     mismatch class of bug already found and fixed once in verifier_dpo/infer.py).
+  - llm: verifier.frozen_llm.score_candidate(), a genuinely NEW variant of build 08/09's frozen
+    LLM judge (added 2026-08-04) -- the original score_turn() judges a turn using obs_after (the
+    RESULT of an action already taken), which Best-of-N structurally cannot provide (candidates
+    must be ranked BEFORE one is executed). score_candidate() is a separate function/prompt that
+    predicts a candidate's quality from intent alone (no obs_after), a different task from the one
+    build 08/09 validated -- its own numbers here are this task's first real evaluation, not
+    inherited from that earlier validation. no local model to load; each candidate costs one real
+    LLM inference call (slower than mc/dpo's local forward passes).
+
+there is no per-candidate "accuracy" metric here -- no ground-truth optimal action exists to score
+predictions against. the metric is WIN RATE: does letting the verifier pick among N sampled
+candidates each turn win more often, in aggregate over many episodes, than a plain single greedy
+choice (see the baseline vs. best_of_n win-rate comparison this script prints/saves).
 
 usage:
     python -m scripts.best_of_n_eval --scorer mc --n 5 --episodes-per-game 20 \\
@@ -35,6 +48,8 @@ usage:
     python -m scripts.best_of_n_eval --scorer dpo --n 5 --episodes-per-game 20 \\
         --dpo-checkpoint verifier_dpo/checkpoints/finetune_v2/model.pt \\
         --worker-model hf:Qwen/Qwen2.5-3B-Instruct --out reports/best_of_n_dpo.json
+    python -m scripts.best_of_n_eval --scorer llm --n 5 --episodes-per-game 20 \\
+        --worker-model hf:Qwen/Qwen2.5-3B-Instruct --out reports/best_of_n_llm.json
 """
 
 import argparse
@@ -58,6 +73,18 @@ def _score_candidates_mc(verifier_obj, task_goal, plan, obs, candidates):
     items = [(task_goal, plan, obs, action) for action in candidates]
     results = verifier_obj.score_batch(items)  # list of (q_value, advantage)
     return [advantage for _, advantage in results]
+
+
+def _score_candidates_llm(judge_model, task_goal, action_history, obs, candidates):
+    """returns per-candidate scores via verifier.frozen_llm.score_candidate() -- a real LLM
+    reasoning call per candidate, no local model needed but much slower than mc/dpo's local
+    forward passes (one live inference call per candidate, not a batched tensor op)."""
+    from verifier.frozen_llm import score_candidate
+    scores = []
+    for action in candidates:
+        score, _usage = score_candidate(task_goal, action_history, obs, action, model=judge_model)
+        scores.append(score)
+    return scores
 
 
 def _score_candidates_dpo(model, tokenizer, device, traj_so_far: dict, candidates):
@@ -128,7 +155,7 @@ def run_best_of_n_episode(
             candidates = [admissible[0]]
 
         traj_so_far["_pending_obs"] = current_obs
-        scores = score_fn(task_goal, ep_plan, current_obs, candidates, traj_so_far)
+        scores = score_fn(task_goal, ep_plan, current_obs, candidates, traj_so_far, action_history)
         best_idx = max(range(len(candidates)), key=lambda i: scores[i])
         chosen = candidates[best_idx]
 
@@ -187,7 +214,7 @@ def evaluate(
         from verifier.infer import Verifier
         verifier_obj = Verifier(checkpoint_dir)
 
-        def score_fn(task_goal, plan, obs, candidates, _traj_so_far):
+        def score_fn(task_goal, plan, obs, candidates, _traj_so_far, _action_history):
             return _score_candidates_mc(verifier_obj, task_goal, plan, obs, candidates)
 
     elif scorer == "dpo":
@@ -203,8 +230,16 @@ def evaluate(
         model.load_state_dict(torch.load(dpo_checkpoint, map_location=device))
         model.eval()
 
-        def score_fn(task_goal, plan, obs, candidates, traj_so_far):
+        def score_fn(task_goal, plan, obs, candidates, traj_so_far, _action_history):
             return _score_candidates_dpo(model, tokenizer, device, traj_so_far, candidates)
+
+    elif scorer == "llm":
+        # no local model to load -- score_candidate makes a real inference call per candidate
+        # (via agents/llm.py's complete_with_usage), same worker_model used for the worker itself
+        # unless a different judge model is wanted; reusing worker_model keeps this comparable to
+        # build 08/09's frozen-LLM judge, which also used the project's standard local model.
+        def score_fn(task_goal, plan, obs, candidates, _traj_so_far, action_history):
+            return _score_candidates_llm(worker_model, task_goal, action_history, obs, candidates)
 
     else:
         raise ValueError(f"unknown scorer: {scorer}")
@@ -272,7 +307,7 @@ def evaluate(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scorer", choices=["mc", "dpo"], required=True)
+    parser.add_argument("--scorer", choices=["mc", "dpo", "llm"], required=True)
     parser.add_argument("--n", type=int, default=5)
     parser.add_argument("--episodes-per-game", type=int, default=20)
     parser.add_argument("--worker-model", type=str, default="hf:Qwen/Qwen2.5-3B-Instruct")
