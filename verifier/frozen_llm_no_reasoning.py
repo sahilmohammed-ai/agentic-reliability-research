@@ -7,8 +7,8 @@ from agents.llm import complete_with_usage
 # (a correct, environment-confirmed action scored 0.0 with no visible reasoning) and switched to
 # requiring reasoning before the score. this module exists to re-test that call systematically,
 # at scale, against build 03's full 100-episode baseline, rather than trust a single example --
-# see reports/twx/09_verifier_variants.md for the result. NOT used by any live coordinator;
-# offline-scoring only, same as verifier/frozen_llm.py's evaluation use in build 08.
+# see reports/twx/09_verifier_variants.md for the result. offline-scoring only, same as
+# verifier/frozen_llm.py's evaluation use in build 08.
 SYSTEM = """\
 You are a progress verifier for an agent acting in a text-based environment.
 You will be given the task goal, the full sequence of actions taken so far in this episode, and

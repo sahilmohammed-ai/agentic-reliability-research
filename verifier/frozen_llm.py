@@ -73,7 +73,7 @@ def score_turn(
     """score one turn's progress with a frozen (untrained) LLM judge. returns (score, usage).
 
     action_history is everything taken BEFORE this turn (not including `action`), giving the
-    judge the same repetition/stall context a coordinator would have."""
+    judge the same repetition/stall context available at decision time."""
     history_block = (
         "\n".join(f"- {a}" for a in action_history) if action_history else "(no actions yet)"
     )

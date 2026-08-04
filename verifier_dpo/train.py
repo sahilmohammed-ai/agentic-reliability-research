@@ -19,8 +19,8 @@ what this does NOT test and is not expected to show: same-state, two-different-a
 discrimination. this objective never sees two actions at one state side by side -- it only sees
 whole trajectories against each other. a flat local sanity-check pass would validate "the verifier
 can separate winning-flavored turns from losing-flavored turns," which is real signal for episode-
-level failure detection, not a claim that it resolves the coordinator's exact same-state reward
-problem (see verifier_dpo/model.py's module docstring and .info/CLAUDE.md for the full context).
+level failure detection, not fine-grained per-action discrimination at a single state (see
+verifier_dpo/model.py's module docstring and .info/CLAUDE.md for the full context).
 """
 
 import argparse
