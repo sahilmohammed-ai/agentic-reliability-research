@@ -168,8 +168,17 @@ def run_multi_seed(
     calibration/test split each time) and reports the mean +/- range of test-set F1/precision/
     recall across seeds, not a single split's number -- added after confirming a real, honest
     result requires this: an initial single-seed run (F1=0.849) turned out to be the high end of a
-    0.765-0.849 range across 5 seeds, not representative on its own."""
+    0.765-0.849 range across 5 seeds, not representative on its own.
+
+    ALSO computes a per-game breakdown at each seed (same calibrated threshold applied to just
+    that game's test-set episodes, same as run()'s per_game_test), then reports the mean +/- range
+    per game across seeds too -- added because the pooled-only summary was previously the only
+    thing saved, with no way to tell whether pooled performance was even across games or driven by
+    one or two of them. per-game n is small for some games (e.g. peckingorder's few lost episodes
+    split further into calibration/test halves) -- flag any game whose test-set lost-episode count
+    is small when reporting this, the same caveat already applied to peckingorder's AUC."""
     all_results = []
+    per_game_all_seeds: dict[str, list[dict]] = {}
     for seed in seeds:
         print(f"\n=== seed {seed} ===")
         with open(scores_path) as f:
@@ -199,6 +208,19 @@ def run_multi_seed(
               f"recall={test_result['recall']:.3f} f1={test_result['f1']:.3f}")
         all_results.append(test_result)
 
+        for game, eps in by_game.items():
+            game_test = [ep for ep in test if ep["game"] == game]
+            if not game_test:
+                continue
+            game_result = evaluate_at_threshold(game_test, score_field, k, threshold)
+            game_result["seed"] = seed
+            game_result["n_test_episodes"] = len(game_test)
+            game_result["n_test_lost"] = sum(1 for ep in game_test if not ep["won"])
+            per_game_all_seeds.setdefault(game, []).append(game_result)
+            print(f"    {game}: precision={game_result['precision']:.3f} "
+                  f"recall={game_result['recall']:.3f} f1={game_result['f1']:.3f} "
+                  f"(n_test={len(game_test)}, n_lost={game_result['n_test_lost']})")
+
     f1s = [r["f1"] for r in all_results]
     precisions = [r["precision"] for r in all_results]
     recalls = [r["recall"] for r in all_results]
@@ -209,9 +231,29 @@ def run_multi_seed(
         "precision_mean": sum(precisions) / len(precisions),
         "recall_mean": sum(recalls) / len(recalls),
     }
-    print(f"\nACROSS {len(seeds)} SEEDS: f1 mean={summary['f1_mean']:.3f} "
+
+    per_game_summary = {}
+    for game, results in per_game_all_seeds.items():
+        gf1 = [r["f1"] for r in results]
+        gprec = [r["precision"] for r in results]
+        grec = [r["recall"] for r in results]
+        per_game_summary[game] = {
+            "per_seed": results,
+            "f1_mean": sum(gf1) / len(gf1), "f1_min": min(gf1), "f1_max": max(gf1),
+            "precision_mean": sum(gprec) / len(gprec),
+            "recall_mean": sum(grec) / len(grec),
+            "n_test_lost_per_seed": [r["n_test_lost"] for r in results],
+        }
+    summary["per_game"] = per_game_summary
+
+    print(f"\nACROSS {len(seeds)} SEEDS (pooled): f1 mean={summary['f1_mean']:.3f} "
           f"(range {summary['f1_min']:.3f}-{summary['f1_max']:.3f}), "
           f"precision mean={summary['precision_mean']:.3f}, recall mean={summary['recall_mean']:.3f}")
+    print("\nACROSS SEEDS, per game:")
+    for game, s in per_game_summary.items():
+        print(f"  {game}: f1_mean={s['f1_mean']:.3f} (range {s['f1_min']:.3f}-{s['f1_max']:.3f}) "
+              f"precision_mean={s['precision_mean']:.3f} recall_mean={s['recall_mean']:.3f} "
+              f"n_test_lost_per_seed={s['n_test_lost_per_seed']}")
 
     with open(out_path, "w") as f:
         json.dump(summary, f, indent=2)
