@@ -21,7 +21,7 @@ on coin (0%->65% with verifier_dpo, 0%->35% with verifier_mc), the first result 
 to move that game off zero, direct evidence the verifier's signal is applicable, not just
 statistically separable offline.
 
-supports scoring candidates with any of THREE verifiers via --scorer:
+supports scoring candidates with any of FOUR --scorer options:
   - mc: verifier.infer.Verifier (checkpoints/verifier_mc), uses .advantage on each candidate turn.
   - dpo: verifier_dpo's PreferenceScorer, uses the mean per-token score of the trajectory-so-far
     WITH the candidate action appended (a growing-prefix episode_score call), since verifier_dpo
@@ -36,6 +36,14 @@ supports scoring candidates with any of THREE verifiers via --scorer:
     build 08/09 validated -- its own numbers here are this task's first real evaluation, not
     inherited from that earlier validation. no local model to load; each candidate costs one real
     LLM inference call (slower than mc/dpo's local forward passes).
+  - random: the NO-VERIFIER ablation (added 2026-08-06). candidates are still sampled from the
+    worker at temperature>0 (same diversity mechanism as every other scorer), but each candidate
+    gets a random score, so the argmax pick is effectively arbitrary among them. isolates how much
+    of Best-of-N's win-rate lift comes from the VERIFIER'S JUDGMENT specifically, vs. just the act
+    of sampling N candidates and picking SOME one of them (sampling alone might occasionally
+    surface a better action than a single greedy call would, even before any real scoring is
+    applied -- this scorer measures exactly that effect in isolation). zero model/checkpoint
+    needed, the cheapest run in this script.
 
 there is no per-candidate "accuracy" metric here -- no ground-truth optimal action exists to score
 predictions against. the metric is WIN RATE: does letting the verifier pick among N sampled
@@ -50,6 +58,8 @@ usage:
         --worker-model hf:Qwen/Qwen2.5-3B-Instruct --out reports/best_of_n_dpo.json
     python -m scripts.best_of_n_eval --scorer llm --n 5 --episodes-per-game 20 \\
         --worker-model hf:Qwen/Qwen2.5-3B-Instruct --out reports/best_of_n_llm.json
+    python -m scripts.best_of_n_eval --scorer random --n 5 --episodes-per-game 20 \\
+        --worker-model hf:Qwen/Qwen2.5-3B-Instruct --out reports/best_of_n_random.json
 """
 
 import argparse
@@ -331,6 +341,19 @@ def evaluate(
         def score_fn(task_goal, plan, obs, candidates, _traj_so_far, action_history):
             return _score_candidates_llm(worker_model, task_goal, action_history, obs, candidates)
 
+    elif scorer == "random":
+        # the no-verifier ablation: candidates are still sampled at temperature>0 (same diversity
+        # mechanism as every other scorer), but the argmax pick is effectively arbitrary since
+        # every candidate gets a random score. isolates how much of Best-of-N's win-rate lift comes
+        # from the VERIFIER'S JUDGMENT specifically, vs. just the act of sampling N candidates and
+        # picking SOME one of them (e.g. sampling might itself surface a better action than a
+        # single greedy call would, even before any scoring is applied). zero model/checkpoint
+        # needed -- the cheapest possible run in this script.
+        import random as _random
+
+        def score_fn(task_goal, plan, obs, candidates, _traj_so_far, _action_history):
+            return [_random.random() for _ in candidates]
+
     else:
         raise ValueError(f"unknown scorer: {scorer}")
 
@@ -398,7 +421,7 @@ def evaluate(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scorer", choices=["mc", "dpo", "llm"], required=True)
+    parser.add_argument("--scorer", choices=["mc", "dpo", "llm", "random"], required=True)
     parser.add_argument("--n", type=int, default=5)
     parser.add_argument("--episodes-per-game", type=int, default=20)
     parser.add_argument("--worker-model", type=str, default="hf:Qwen/Qwen2.5-3B-Instruct")
