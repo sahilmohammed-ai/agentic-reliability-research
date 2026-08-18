@@ -60,7 +60,7 @@ import uuid
 from dotenv import load_dotenv
 load_dotenv()
 
-from agents import thinker, worker
+from agents import single_agent, thinker, worker
 from envs.textworldexpress_env import TextWorldExpressEnvWrapper, TRAINING_GAMES
 from rollout.schemas import Trajectory, Turn
 
@@ -189,26 +189,116 @@ def run_best_of_n_episode(
     )
 
 
+def run_best_of_n_single_agent_episode(
+    env, n: int, worker_model: str, score_fn, task_id: str | None = None,
+) -> Trajectory:
+    """single-agent counterpart to run_best_of_n_episode: mirrors rollout/runner.py's
+    run_single_agent_episode() (no thinker, no plan, one model call per step via
+    agents/single_agent.py) instead of the thinker+worker loop. sample N candidates from
+    single_agent.act() at temperature>0, score with the verifier, execute the argmax -- same
+    mechanism as the thinker+worker version, just applied to the plan-free baseline requested for
+    a same-settings comparison against build 01's single-agent numbers.
+
+    plan is passed to score_fn as "" throughout (never None), matching how
+    rollout/runner.py's run_single_agent_episode() stores plan="" for its own trajectories --
+    verifier.infer.Verifier.score() and verifier_dpo's build_episode_text() both accept an empty
+    plan string as a real, valid input, not a special case to branch on."""
+    task_id = task_id or str(uuid.uuid4())[:8]
+    turns: list[Turn] = []
+    action_history: list[str] = []
+    env_step = 0
+    max_steps = getattr(env, "step_limit", 50)
+
+    obs, info = env.reset()
+    task_goal = env.task_goal(obs, info)
+    env_hint = env.worker_hint() if hasattr(env, "worker_hint") else ""
+
+    done = False
+    current_obs = obs
+    traj_so_far = {"task_goal": task_goal, "plan": "", "turns": []}
+
+    while not done and env_step < max_steps:
+        admissible = env.admissible_commands(info)
+
+        seen, candidates = set(), []
+        for _ in range(n):
+            cand, _cand_usage = single_agent.act(
+                task_goal, current_obs, admissible, action_history,
+                model=worker_model, env_hint=env_hint, temperature=TEMPERATURE,
+            )
+            if cand not in seen:
+                seen.add(cand)
+                candidates.append(cand)
+        if not candidates:
+            candidates = [admissible[0]]
+
+        traj_so_far["_pending_obs"] = current_obs
+        scores = score_fn(task_goal, "", current_obs, candidates, traj_so_far, action_history)
+        best_idx = max(range(len(candidates)), key=lambda i: scores[i])
+        chosen = candidates[best_idx]
+
+        next_obs, reward, done, info = env.step(chosen)
+        env_step += 1
+        action_history.append(chosen)
+
+        turns.append(Turn(
+            step=env_step, role="worker", obs_before=current_obs, action=chosen,
+            obs_after=next_obs, env_reward=reward, done=done,
+            metadata={
+                "admissible_commands": admissible,
+                "best_of_n_candidates": candidates,
+                "best_of_n_scores": scores,
+                "best_of_n_chosen_idx": best_idx,
+            },
+        ))
+        traj_so_far["turns"].append({
+            "role": "worker", "step": env_step, "obs_before": current_obs, "action": chosen,
+        })
+        current_obs = next_obs
+
+    return Trajectory(
+        task_id=task_id, task_goal=task_goal, plan="", turns=turns,
+        won=env.won(info), total_steps=env_step,
+    )
+
+
 def run_baseline_episode(env, worker_model: str, task_id: str | None = None) -> Trajectory:
-    """N=1 greedy baseline -- delegates to rollout/runner.py's run_episode() directly rather than
-    reimplementing it, so this is provably the exact same code path builds 03/10-12 were evaluated
-    against, not a re-derived approximation of it."""
+    """N=1 greedy baseline (thinker+worker loop) -- delegates to rollout/runner.py's run_episode()
+    directly rather than reimplementing it, so this is provably the exact same code path builds
+    03/10-12 were evaluated against, not a re-derived approximation of it."""
     from rollout.runner import run_episode
     return run_episode(env, task_id=task_id, model=worker_model)
+
+
+def run_baseline_single_agent_episode(env, worker_model: str, task_id: str | None = None) -> Trajectory:
+    """N=1 greedy baseline (single-agent, no plan) -- delegates to rollout/runner.py's
+    run_single_agent_episode() directly, the exact code path build 01 was evaluated against."""
+    from rollout.runner import run_single_agent_episode
+    return run_single_agent_episode(env, task_id=task_id, model=worker_model)
 
 
 def evaluate(
     scorer: str, n: int, episodes_per_game: int, worker_model: str,
     checkpoint_dir: str, dpo_checkpoint: str, split: str, out_path: str,
-    games: tuple[str, ...] | None = None,
+    games: tuple[str, ...] | None = None, agent_type: str = "loop",
 ) -> None:
     """NOTE on methodology: baseline and best-of-n episodes are run on INDEPENDENT env resets
     (TextWorldExpressEnvWrapper.reset() draws a new random seed each call, confirmed in
     envs/textworldexpress_env.py) -- the i-th baseline episode and the i-th best-of-n episode are
     NOT the same underlying task instance, matching how builds 03/10-12 were evaluated (each run
     draws fresh, no fixed-seed pairing). only the AGGREGATE win rate over episodes_per_game is a
-    meaningful comparison; individual per-episode print lines are not a controlled pairwise A/B."""
+    meaningful comparison; individual per-episode print lines are not a controlled pairwise A/B.
+
+    agent_type="loop" (default): thinker+worker agentic loop, the ORIGINAL Best-of-N condition.
+    agent_type="single": the plan-free single-agent baseline (build 01), requested as a same-
+    settings comparison alongside the loop -- does Best-of-N help even without a thinker's plan?"""
     games = games or TRAINING_GAMES
+    if agent_type == "loop":
+        run_bon_episode, run_base_episode = run_best_of_n_episode, run_baseline_episode
+    elif agent_type == "single":
+        run_bon_episode, run_base_episode = run_best_of_n_single_agent_episode, run_baseline_single_agent_episode
+    else:
+        raise ValueError(f"unknown agent_type: {agent_type}")
 
     if scorer == "mc":
         from verifier.infer import Verifier
@@ -244,26 +334,27 @@ def evaluate(
     else:
         raise ValueError(f"unknown scorer: {scorer}")
 
-    results = {"scorer": scorer, "n": n, "games": {}}
+    results = {"scorer": scorer, "n": n, "agent_type": agent_type, "games": {}}
 
     # save Best-of-N episode traces (candidates + scores at every turn, plus the plain baseline
     # trajectory for comparison) -- added after the first real run's results.json turned out to
     # contain only aggregate win rates, with no way to inspect WHY a game like mapreader stayed at
     # 0% under both conditions (worker capability gap vs. some best-of-n-specific issue) without
     # rerunning. traces_dir defaults alongside out_path so this doesn't need a new CLI flag.
-    traces_dir = os.path.join(os.path.dirname(out_path) or ".", f"best_of_n_traces_{scorer}")
+    # agent_type suffix keeps loop and single-agent traces from overwriting each other.
+    traces_dir = os.path.join(os.path.dirname(out_path) or ".", f"best_of_n_traces_{scorer}_{agent_type}")
     os.makedirs(traces_dir, exist_ok=True)
 
     for game in games:
         baseline_won, bon_won = 0, 0
         for i in range(episodes_per_game):
             env = TextWorldExpressEnvWrapper(split=split, games=(game,))
-            baseline_traj = run_baseline_episode(env, worker_model, task_id=f"{game}_baseline_{i}")
+            baseline_traj = run_base_episode(env, worker_model, task_id=f"{game}_baseline_{i}")
             baseline_won += int(baseline_traj.won)
             env.close()
 
             env = TextWorldExpressEnvWrapper(split=split, games=(game,))
-            bon_traj = run_best_of_n_episode(
+            bon_traj = run_bon_episode(
                 env, n, worker_model, score_fn, task_id=f"{game}_bon_{i}",
             )
             bon_won += int(bon_traj.won)
@@ -320,9 +411,14 @@ if __name__ == "__main__":
                          help="comma-separated subset of TRAINING_GAMES (default: all 4) -- "
                               "e.g. --games mapreader to re-check one game's traces cheaply "
                               "without rerunning the full sweep")
+    parser.add_argument("--agent-type", choices=["loop", "single"], default="loop",
+                         help="loop (default): thinker+worker agentic loop, the original "
+                              "Best-of-N condition. single: the plan-free single-agent baseline "
+                              "(build 01) -- same Best-of-N mechanism, no thinker/plan involved.")
     args = parser.parse_args()
     games = tuple(args.games.split(",")) if args.games else None
     evaluate(
         args.scorer, args.n, args.episodes_per_game, args.worker_model,
         args.checkpoint_dir, args.dpo_checkpoint, args.split, args.out, games=games,
+        agent_type=args.agent_type,
     )

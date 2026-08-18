@@ -23,10 +23,16 @@ def act(
     history: list[str] | None = None,
     model: str = "claude-haiku-4-5-20251001",
     env_hint: str = "",
+    temperature: float = 0.0,
 ) -> tuple[str, dict]:
     """select one admissible command that best advances the task, no plan involved.
 
-    returns (action, usage), same contract as agents/worker.py's act()."""
+    returns (action, usage), same contract as agents/worker.py's act().
+
+    temperature=0.0 (default) is the existing deterministic/greedy behavior every current caller
+    relies on -- unchanged. only scripts/best_of_n_eval.py passes a nonzero value, to sample N
+    genuinely different candidate actions at the same state for the single-agent Best-of-N
+    condition (same reasoning as agents/worker.py's identical parameter)."""
     history_block = ""
     if history:
         history_block = "Recent actions taken:\n" + "\n".join(f"- {a}" for a in history[-5:]) + "\n\n"
@@ -42,7 +48,7 @@ def act(
         f"Admissible commands:\n{commands_block}\n\n"
         "Choose one command from the list above:"
     )
-    raw, usage = complete_with_usage(model, SYSTEM, prompt, max_tokens=1024)
+    raw, usage = complete_with_usage(model, SYSTEM, prompt, max_tokens=1024, temperature=temperature)
 
     usage["raw_output"] = raw
     raw_lower = raw.lower()
