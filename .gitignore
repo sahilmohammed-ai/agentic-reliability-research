@@ -34,3 +34,5 @@ scripts/collect_branches.py
 
 # macOS
 .DS_Store
+
+reports/
