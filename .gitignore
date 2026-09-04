@@ -14,5 +14,9 @@ data/labeled/
 # Model checkpoints
 checkpoints/
 
+# Baseline-only agent (build 01-03, superseded by the verifier-centered pipeline; kept locally
+# for anyone who clones the repo and wants to regenerate baseline numbers, not tracked publicly)
+agents/single_agent.py
+
 # macOS
 .DS_Store
