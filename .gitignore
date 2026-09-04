@@ -27,5 +27,10 @@ rollout/label_td.py
 # documented, closed experiment, not tracked publicly as current work.
 rollout/label_rules.py
 
+# Same-state branching-rollout collection: killed early after a smoke test showed most branch
+# pairs collapse to diff=0.0000 (TextWorldExpress's reward is too sparse/terminal-concentrated --
+# see results.md). closed, documented negative result, not current work.
+scripts/collect_branches.py
+
 # macOS
 .DS_Store
