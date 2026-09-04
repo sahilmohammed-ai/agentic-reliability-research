@@ -18,5 +18,9 @@ checkpoints/
 # for anyone who clones the repo and wants to regenerate baseline numbers, not tracked publicly)
 agents/single_agent.py
 
+# Superseded labeler (build 11's TD/GAE experiment, "a wash vs MC" -- see results.md; kept
+# locally so the comparison can be rerun, not tracked publicly as if it were current work)
+rollout/label_td.py
+
 # macOS
 .DS_Store
