@@ -47,6 +47,7 @@ cp .env.example .env
 
 - `ANTHROPIC_API_KEY` — needed for Claude-based agents (used in early baseline builds).
 - `OPENAI_API_KEY` — needed for GPT-based baseline comparisons.
+- `LANGSMITH_*` — optional, only needed if LangSmith tracing is enabled.
 - Local, open-source models (the default for all current verifier/Best-of-N work,
   `hf:Qwen/Qwen2.5-3B-Instruct`) need no API key — they run locally via `transformers`.
 
