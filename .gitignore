@@ -22,5 +22,10 @@ agents/single_agent.py
 # locally so the comparison can be rerun, not tracked publicly as if it were current work)
 rollout/label_td.py
 
+# Rule-based labeler: worked mechanically, explicitly rejected on principle (replaces
+# environment-outcome learning with a hand-written rubric -- see results.md). kept locally as a
+# documented, closed experiment, not tracked publicly as current work.
+rollout/label_rules.py
+
 # macOS
 .DS_Store
