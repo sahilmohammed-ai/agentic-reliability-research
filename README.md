@@ -1,24 +1,7 @@
 # agentic-reliability-research
 
-Research project on a learned, turn-level verifier for an LLM agentic system, evaluated on
-TextWorldExpress. The verifier is trained purely from real environment outcomes (no hand-written
-rules) and evaluated as an online failure detector and as a real-time decision-quality signal
-(Best-of-N action selection). See `reports/` for the full build-by-build experiment log.
-
-Two independently-trained verifiers are compared throughout:
-
-- **`verifier_mc`** — trained via per-step Monte-Carlo return regression on real environment
-  reward.
-- **`verifier_dpo`** — trained via a Bradley-Terry/DPO-style preference objective on real
-  per-episode won/lost outcomes only, with per-turn scores read off as a byproduct.
-
-An earlier phase of this project also trained a learned PPO coordinator on top of the verifier's
-signal. That line was tested across six independent training runs, diagnosed precisely (turn-level
-verifier reward, however constructed, could not train a policy to reliably beat a strong
-single-agent-loop baseline on this environment), and removed from the current codebase; see
-`reports/04_coordinator_replan.md` through `reports/07_backtrack.md` for the fixed-coordinator
-baselines that motivated it. The current methodology and all reported results center on the
-verifier itself.
+**Abstract:**
+Agentic AI has enabled Large Language Models (LLMs) to move past single-turn conversations, creating systems that can plan and act sequentially through many steps. Although LLM agents have made significant strides toward reliability, they still face difficulties when completing long-horizon tasks. Part of the problem is that agents, by themselves, often lack mechanisms for gauging performance throughout task execution. One promising approach is the use of a verifier; a component found in many agentic systems that evaluates agent performance. Many variations of verifiers have been implemented, including rule-based output validators, critic models, and learned models trained to score the actions taken by an agent. This paper trains and compares two categories of verifiers that incorporate supervision at different granularities. The first category is the Temporal Value Verifier (TVV), trained with dense per-step Monte Carlo return-to-go targets. The second category is the Episodic Preference Verifier (EPV), trained on coarse whole-episode Bradley-Terry preference comparisons between successful and unsuccessful episodes. TVV outperformed EPV at identifying failures and detecting failure online (pooled AUC 0.844 vs. 0.796; F1 0.796 vs. 0.710), while EPV produced the larger Best-of-N downstream gain in the environment where verifier-guided selection exceeded the random-selection control.
 
 ## Setup
 
@@ -67,12 +50,12 @@ scripts in this repo were run and validated on CUDA.
 | `verifier/` | `verifier_mc`'s model, training, and inference code, plus the frozen/untrained LLM judge baseline (`frozen_llm.py`). |
 | `verifier_dpo/` | `verifier_dpo`'s model, training, and inference code. |
 | `scripts/` | evaluation entry points — AUC scoring, online failure detection, Best-of-N, difficulty calibration, dataset consolidation. |
-| `reports/` | the numbered build-by-build experiment log (01 through 12), written contemporaneously as each experiment ran. |
 | `checkpoints/`, `data/` | trained model weights and collected/labeled episode data (gitignored — see below). |
 
-Some early-project files (the single-agent baseline agent, and a few labeling/collection scripts
-representing closed, superseded experiments) are kept on disk for local replication but are not
-tracked in this repository; see `.gitignore` for the full list and the reasoning next to each.
+Some early-project files (the single-agent baseline agent, a few labeling/collection scripts
+representing closed, superseded experiments, and the numbered build-by-build experiment log) are
+kept on disk for local replication but are not tracked in this repository; see `.gitignore` for
+the full list and the reasoning next to each.
 
 ## Data and checkpoints
 
@@ -87,9 +70,8 @@ version control. To regenerate them:
 
 ## Results
 
-The full, numbered experiment log lives in `reports/` (baselines, heuristic coordination,
-verifier development, and difficulty calibration), written up as each experiment ran. Cross-cutting
-comparisons across both verifiers — per-game and pooled AUC, online failure detection
-(precision/recall/F1/lead-time), and Best-of-N win-rate lift, all computed on the same held-out
-`eval_ood` episodes — are the current headline results; regenerate them with the scripts in
-`scripts/` listed above.
+The headline comparison (see the abstract above) is computed identically for both verifiers on
+the same held-out `eval_ood` episodes across three metrics: per-game and pooled AUC, online
+failure detection (precision/recall/F1/lead-time), and Best-of-N win-rate lift against a
+random-selection control. Regenerate any of these with the evaluation scripts in `scripts/`
+listed above.
